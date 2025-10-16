@@ -1,7 +1,8 @@
 streamlit
 pandas
 numpy
+matplotlib
 scikit-learn
 textblob
-matplotlib
-
+wordcloud
+plotly

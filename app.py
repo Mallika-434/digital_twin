@@ -81,10 +81,14 @@ with tab_overview:
           .mean().mul(100).sort_values(ascending=True)
           .reset_index().rename(columns={"label": "Yes %"})
     )
-    fig_bg = px.bar(yes_by_bg, x="Yes %", y="academic_background",
-                    orientation="h", title="Likelihood to Apply by Background")
+    yes_by_bg = yes_by_bg.sort_values("Yes %", ascending=False)
+    
+    fig_bg = px.bar( yes_by_bg, x="academic_background", y="Yes %", color="Yes %",
+                    color_continuous_scale="Blues",title="Likelihood to Apply by Background")
+    fig_bg.update_layout( xaxis_title="Academic Background", yaxis_title="Yes %", 
+                         xaxis_tickangle=-45, showlegend=False,) 
     st.plotly_chart(fig_bg)
-
+    
     st.subheader("Yes % by Work Experience")
     yes_by_exp = (
         df.groupby("previous_work_experience")["label"]

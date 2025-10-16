@@ -1,14 +1,14 @@
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Apply-Insight Portal", layout="wide")
-st.title("🎓 Apply-Insight Portal")
+st.set_page_config(page_title="Student Apply-Insight Portal", layout="wide")
+st.title("Student Apply-Insight Portal")
 
 from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Apply-Insight Portal", layout="wide")
+st.set_page_config(page_title="Student Apply-Insight Portal", layout="wide")
 
 # ✅ Always load from the repo's /data folder (works locally + Streamlit Cloud)
 ROOT = Path(__file__).parent
@@ -38,7 +38,7 @@ no_pct = 100 - yes_pct
 avg_len = df["rationale"].fillna("").apply(lambda s: len(str(s).split())).mean()
 autofixed_pct = 100 * df["auto_fixed"].astype(str).str.lower().eq("yes").mean()
 
-tab_overview, tab_tech = st.tabs(["Overview (Non-Technical)", "Lab (Technical)"])
+tab_overview, tab_tech = st.tabs(["Non-Technical", "Technical"])
 
 with tab_overview:
     c1, c2, c3, c4 = st.columns(4)

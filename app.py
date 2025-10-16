@@ -41,19 +41,70 @@ autofixed_pct = 100 * df["auto_fixed"].astype(str).str.lower().eq("yes").mean()
 tab_overview, tab_tech = st.tabs(["Non-Technical", "Technical"])
 
 with tab_overview:
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Yes %", f"{yes_pct:.1f}%")
-    c2.metric("No %", f"{no_pct:.1f}%")
-    c3.metric("Avg rationale words", f"{avg_len:.1f}")
-    c4.metric("% auto-fixed", f"{autofixed_pct:.1f}%")
+    # --- Filter & Explore (three-field filter) ---
+st.subheader("Filter & Explore")
 
-    st.subheader("Yes % by Academic Background")
-    st.bar_chart(df.groupby("academic_background")["label"].mean().sort_values().mul(100))
+# Ensure clean string columns for filters
+df["_background"] = df["academic_background"].astype(str)
+df["_experience"] = df["previous_work_experience"].astype(str)
+df["_apply"] = df["would_apply"].astype(str).str.lower()
 
-    st.subheader("Table (filterable)")
-    bg = st.multiselect("Filter by background", sorted(df["academic_background"].astype(str).unique().tolist()))
-    view = df if not bg else df[df["academic_background"].isin(bg)]
-    st.dataframe(view, width="stretch")
+colf1, colf2, colf3, colf4 = st.columns([1,1,1,0.5])
+
+with colf1:
+    bg_sel = st.multiselect(
+        "Academic background",
+        options=sorted(df["_background"].unique().tolist()),
+        default=[],
+        help="Select one or more backgrounds; leave empty for all."
+    )
+
+with colf2:
+    exp_sel = st.multiselect(
+        "Previous work experience",
+        options=sorted(df["_experience"].unique().tolist()),
+        default=[],
+        help="Select Yes/No (or leave empty for all)."
+    )
+
+with colf3:
+    apply_sel = st.multiselect(
+        "Would apply",
+        options=["yes", "no"],
+        default=[],
+        help="Filter by decision; leave empty for all."
+    )
+
+with colf4:
+    reset = st.button("Reset filters")
+
+# Apply filters
+view = df.copy()
+if reset:
+    bg_sel, exp_sel, apply_sel = [], [], []
+
+if bg_sel:
+    view = view[view["_background"].isin(bg_sel)]
+if exp_sel:
+    view = view[view["_experience"].isin(exp_sel)]
+if apply_sel:
+    view = view[view["_apply"].isin([a.lower() for a in apply_sel])]
+
+# Optional: drop helper cols from display
+display_cols = [c for c in view.columns if c not in ["_background","_experience","_apply"]]
+
+# Summary + table
+st.caption(f"Showing {len(view):,} of {len(df):,} rows")
+st.dataframe(view[display_cols], width="stretch")
+
+# Download exactly what’s shown
+st.download_button(
+    label="Download filtered CSV",
+    data=view[display_cols].to_csv(index=False).encode("utf-8"),
+    file_name="decisions_filtered.csv",
+    mime="text/csv",
+)
+
 
 with tab_tech:
     st.subheader("Raw Data Preview")

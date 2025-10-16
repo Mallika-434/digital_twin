@@ -102,39 +102,6 @@ with tab_overview:
     st.markdown("---")
 
     # =========================
-    # Word clouds (rationale themes)
-    # =========================
-    st.subheader("Common rationale keywords")
-
-    col_wc1, col_wc2 = st.columns(2)
-
-    yes_text = " ".join(df.loc[df["would_apply"] == "yes", "rationale"])
-    no_text  = " ".join(df.loc[df["would_apply"] == "no", "rationale"])
-
-    with col_wc1:
-        st.caption("🟢 Yes rationales")
-        if yes_text.strip():
-            wc_yes = WordCloud(width=800, height=450, background_color="white").generate(yes_text)
-            fig, ax = plt.subplots()
-            ax.imshow(wc_yes, interpolation="bilinear")
-            ax.axis("off")
-            st.pyplot(fig, use_container_width=False)
-        else:
-            st.info("No Yes rationales available to render.")
-
-    with col_wc2:
-        st.caption("🔴 No rationales")
-        if no_text.strip():
-            wc_no = WordCloud(width=800, height=450, background_color="white").generate(no_text)
-            fig, ax = plt.subplots()
-            ax.imshow(wc_no, interpolation="bilinear")
-            ax.axis("off")
-            st.pyplot(fig, use_container_width=False)
-        else:
-            st.info("No No rationales available to render.")
-
-    st.markdown("---")
-
     # --- Filter & Explore (three-field filter) ---
     st.subheader("Filter & Explore")
 

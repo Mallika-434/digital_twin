@@ -3,6 +3,7 @@
 from pathlib import Path
 import pandas as pd
 import streamlit as st
+import plotly.express as px
 
 # -----------------------------
 # Page config & title
@@ -19,7 +20,7 @@ CSV_PATH = DATA_DIR / "decisions_enriched.csv"
 
 @st.cache_data(show_spinner=False)
 def load_df(path: Path) -> pd.DataFrame:
-    """Safely load and clean the CSV data."""
+    """Safely load and normalize the CSV data."""
     if not path.exists():
         st.error(f"❌ File not found: {path}")
         st.write("Available files in /data:", [p.name for p in DATA_DIR.glob('*')])
@@ -39,11 +40,11 @@ df = load_df(CSV_PATH)
 df["label"] = (df["would_apply"].str.lower() == "yes").astype(int)
 yes_pct = 100 * df["label"].mean()
 no_pct = 100 - yes_pct
-avg_len = df["rationale"].fillna("").apply(lambda s: len(str(s).split())).mean()
+avg_len = df["rationale"].apply(lambda s: len(str(s).split())).mean()
 autofixed_pct = 100 * df["auto_fixed"].astype(str).str.lower().eq("yes").mean()
 
 # -----------------------------
-# Tabs setup
+# Tabs
 # -----------------------------
 tab_overview, tab_tech = st.tabs(["Non-Technical", "Technical"])
 
@@ -57,6 +58,40 @@ with tab_overview:
     c2.metric("No %", f"{no_pct:.1f}%")
     c3.metric("Avg rationale words", f"{avg_len:.1f}")
     c4.metric("% auto-fixed", f"{autofixed_pct:.1f}%")
+
+    st.markdown("---")
+
+    # =========================
+    # Quick visuals for execs
+    # =========================
+    st.subheader("Overall outcome")
+    yes_count = int((df["would_apply"] == "yes").sum())
+    no_count  = int((df["would_apply"] == "no").sum())
+
+    donut_df = pd.DataFrame({"Decision": ["Yes", "No"], "Count": [yes_count, no_count]})
+    fig_donut = px.pie(donut_df, names="Decision", values="Count", hole=0.55,
+                       title="Would Apply — Yes vs No")
+    st.plotly_chart(fig_donut)
+
+    st.subheader("Yes % by Academic Background", anchor="yes-by-academic-background")
+    yes_by_bg = (
+        df.groupby("academic_background")["label"]
+          .mean().mul(100).sort_values(ascending=True)
+          .reset_index().rename(columns={"label": "Yes %"})
+    )
+    fig_bg = px.bar(yes_by_bg, x="Yes %", y="academic_background",
+                    orientation="h", title="Likelihood to Apply by Background")
+    st.plotly_chart(fig_bg)
+
+    st.subheader("Yes % by Work Experience")
+    yes_by_exp = (
+        df.groupby("previous_work_experience")["label"]
+          .mean().mul(100).reset_index()
+          .rename(columns={"label": "Yes %", "previous_work_experience": "Work Experience"})
+    )
+    fig_exp = px.bar(yes_by_exp, x="Work Experience", y="Yes %",
+                     title="Work Experience Effect")
+    st.plotly_chart(fig_exp)
 
     st.markdown("---")
 
@@ -114,7 +149,7 @@ with tab_overview:
 
     # Summary + table
     st.caption(f"Showing {len(view):,} of {len(df):,} rows")
-    st.dataframe(view[display_cols], width="stretch")
+    st.dataframe(view[display_cols], width="stretch")  # replaces deprecated use_container_width
 
     # Download exactly what’s shown
     st.download_button(
@@ -125,12 +160,12 @@ with tab_overview:
     )
 
 # ======================================================
-# 🧪 TECHNICAL TAB
+# 🧪 TECHNICAL TAB (stub for now)
 # ======================================================
 with tab_tech:
     st.subheader("Raw Data Preview")
     st.dataframe(df.head(50), width="stretch")
-    st.caption("We'll add TF-IDF, logistic drivers, overlaps, and program influence here next.")
+    st.caption("TF-IDF, drivers, overlaps, and program influence will appear here next.")
 
 # Footer
 st.caption("Data source: data/decisions_enriched.csv • Student Apply-Insight Portal")

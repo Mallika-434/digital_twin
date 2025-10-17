@@ -44,7 +44,7 @@ def load_df(path: Path) -> pd.DataFrame:
     df["label"] = (df["would_apply"] == "yes").astype(int)
     df["rationale"] = df["rationale"].fillna("").astype(str)
 
-    # build profile_text if missing
+    # Build profile_text if missing
     if "profile_text" not in df.columns:
         def build_profile_text(r):
             return (
@@ -202,8 +202,7 @@ with tab_overview:
         st.caption("🟢 Yes rationales")
         if yes_text.strip():
             wc_yes = WordCloud(width=800, height=450, background_color="white").generate(yes_text)
-            fig, ax = plt.subplots()
-            ax.imshow(wc_yes, interpolation="bilinear"); ax.axis("off")
+            fig, ax = plt.subplots(); ax.imshow(wc_yes, interpolation="bilinear"); ax.axis("off")
             st.pyplot(fig, use_container_width=False)
         else:
             st.info("No Yes rationales available to render.")
@@ -212,8 +211,7 @@ with tab_overview:
         st.caption("🔴 No rationales")
         if no_text.strip():
             wc_no = WordCloud(width=800, height=450, background_color="white").generate(no_text)
-            fig, ax = plt.subplots()
-            ax.imshow(wc_no, interpolation="bilinear"); ax.axis("off")
+            fig, ax = plt.subplots(); ax.imshow(wc_no, interpolation="bilinear"); ax.axis("off")
             st.pyplot(fig, use_container_width=False)
         else:
             st.info("No No rationales available to render.")
@@ -285,23 +283,36 @@ with tab_tech:
 
     st.markdown("---")
 
-    # --- TF-IDF & Logistic drivers
-    st.markdown("**Keyword Signals**")
-    colcfg1, colcfg2, colcfg3 = st.columns(3)
+    # --- Keyword Signals (clean UI: no min_df slider)
+    st.markdown("### Keyword Signals")
+    st.caption(
+        "We compare TF-IDF of *profile_text* for Yes vs No to find characteristic terms, "
+        "and fit a small Logistic Regression for directional drivers. "
+        "Use n-grams to include phrases; Top-N controls list size."
+    )
+
+    # Controls (simplified)
+    colcfg1, colcfg2 = st.columns([1, 1])
     ngram_opt = colcfg1.selectbox("n-grams", ["1", "1-2"], index=1)
     ngrams = (1, 2) if ngram_opt == "1-2" else (1, 1)
-    min_df = colcfg2.slider("min_df (ignore rare tokens)", 1, 10, 3, 1)
-    top_n  = colcfg3.slider("Top-N terms", 10, 50, 30, 5)
+    top_n = colcfg2.slider("Top-N terms", 10, 50, 30, 5)
 
+    # Fixed min_df inside (no UI knob)
+    FIXED_MIN_DF = 3
     top_yes, top_no, drv_yes, drv_no, acc, vec, clf = tfidf_and_drivers(
         df["profile_text"].astype(str).tolist(),
         df["label"].values,
-        ngrams=ngrams, min_df=min_df, top_n=top_n
+        ngrams=ngrams, min_df=FIXED_MIN_DF, top_n=top_n
     )
 
+    # Accuracy chip
+    st.caption(f"Logistic holdout accuracy (sanity check): **{acc:.3f}**")
+
+    # Class signatures (Yes/No) side-by-side
+    st.markdown("##### Class Signatures (TF-IDF difference)")
     c1, c2 = st.columns(2)
     with c1:
-        st.write("**Characteristic of YES (TF-IDF diff)**")
+        st.write("**Characteristic of YES**")
         st.dataframe(top_yes.head(top_n), width="stretch")
         st.download_button(
             "Download TF-IDF YES terms",
@@ -310,7 +321,7 @@ with tab_tech:
             mime="text/csv",
         )
     with c2:
-        st.write("**Characteristic of NO (TF-IDF diff)**")
+        st.write("**Characteristic of NO**")
         st.dataframe(top_no.head(top_n), width="stretch")
         st.download_button(
             "Download TF-IDF NO terms",
@@ -319,9 +330,13 @@ with tab_tech:
             mime="text/csv",
         )
 
+    st.markdown("---")
+
+    # Drivers (LogReg coefficients) side-by-side
+    st.markdown("##### Directional Drivers (Logistic Regression coefficients)")
     c3, c4 = st.columns(2)
     with c3:
-        st.write("**Push toward YES (LogReg coefficients)**")
+        st.write("**Push toward YES**")
         st.dataframe(drv_yes.head(top_n), width="stretch")
         st.download_button(
             "Download YES drivers",
@@ -330,7 +345,7 @@ with tab_tech:
             mime="text/csv",
         )
     with c4:
-        st.write("**Push toward NO (LogReg coefficients)**")
+        st.write("**Push toward NO**")
         st.dataframe(drv_no.head(top_n), width="stretch")
         st.download_button(
             "Download NO drivers",
@@ -339,7 +354,21 @@ with tab_tech:
             mime="text/csv",
         )
 
-    st.caption(f"Logistic Regression holdout accuracy (sanity check): **{acc:.3f}**")
+    # Quick visual: Top-10 YES drivers
+    st.markdown("##### Top-10 YES Drivers (visual)")
+    if not drv_yes.empty:
+        top10_yes = drv_yes.head(10).iloc[::-1]  # plot from smallest to largest for nicer bars
+        fig_drv = px.bar(
+            top10_yes,
+            x="weight",
+            y="term",
+            orientation="h",
+            title="Terms that push the model toward a YES decision",
+        )
+        fig_drv.update_layout(xaxis_title="Coefficient weight (↑ = more YES)", yaxis_title="Term")
+        st.plotly_chart(fig_drv)
+    else:
+        st.info("Drivers not available with current settings or dataset size.")
 
     st.markdown("---")
 

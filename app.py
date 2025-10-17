@@ -1,17 +1,28 @@
 # app.py — Student Apply-Insight Portal
 
 from pathlib import Path
+import re
+from typing import Tuple
+
+import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 
+# ML bits for the Technical tab
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+
+
 # -----------------------------
 # Page config & title
 # -----------------------------
 st.set_page_config(page_title="Student Apply-Insight Portal", layout="wide")
 st.title("🎓 Student Apply-Insight Portal")
+
 
 # -----------------------------
 # Data Loading
@@ -32,12 +43,99 @@ def load_df(path: Path) -> pd.DataFrame:
     df = df[df["would_apply"].isin(["yes", "no"])].copy()
     df["label"] = (df["would_apply"] == "yes").astype(int)
     df["rationale"] = df["rationale"].fillna("").astype(str)
+
+    # build profile_text if missing
+    if "profile_text" not in df.columns:
+        def build_profile_text(r):
+            return (
+                f"{r.get('academic_background','')}. "
+                f"{r.get('academic_interests','')}. "
+                f"{r.get('professional_interests','')}. "
+                f"gender:{r.get('gender','')}. "
+                f"age:{r.get('age','')}. "
+                f"work:{r.get('previous_work_experience','')}."
+            )
+        df["profile_text"] = df.apply(build_profile_text, axis=1)
     return df
 
 df = load_df(CSV_PATH)
 
+
 # -----------------------------
-# Derived Stats
+# Helpers for the TECH tab
+# -----------------------------
+def _norm_tokens(s: str) -> list[str]:
+    return re.findall(r"[a-z0-9\-]+", str(s).lower())
+
+@st.cache_data(show_spinner=False)
+def compute_overlap_cols(df_: pd.DataFrame) -> pd.DataFrame:
+    """Add overlap tokens + counts between profile_text and rationale."""
+    df2 = df_.copy()
+    def _overlap_row(r):
+        p = set(_norm_tokens(r["profile_text"]))
+        ra = set(_norm_tokens(r["rationale"]))
+        return sorted(p & ra)
+    df2["overlap_tokens"] = df2.apply(_overlap_row, axis=1)
+    df2["overlap_count"] = df2["overlap_tokens"].apply(len)
+    return df2
+
+@st.cache_data(show_spinner=False)
+def tfidf_and_drivers(
+    texts: list[str],
+    labels: np.ndarray,
+    ngrams: Tuple[int, int] = (1, 2),
+    min_df: int = 3,
+    top_n: int = 30,
+):
+    """
+    Returns:
+      top_yes_terms, top_no_terms, drivers_yes, drivers_no, holdout_acc, vectorizer, clf
+    """
+    tfidf = TfidfVectorizer(ngram_range=ngrams, min_df=min_df, stop_words="english")
+    try:
+        X = tfidf.fit_transform(texts)
+    except ValueError:
+        # empty vocab or too-small data
+        return (pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), 0.0, None, None)
+
+    terms = np.array(tfidf.get_feature_names_out())
+    y = np.asarray(labels)
+
+    # class signatures via mean TF-IDF difference
+    yes_mean = X[y == 1].mean(axis=0)
+    no_mean  = X[y == 0].mean(axis=0)
+    diff = np.asarray(yes_mean - no_mean).ravel()
+
+    top_yes_idx = diff.argsort()[::-1][:top_n]
+    top_no_idx  = diff.argsort()[:top_n]
+
+    top_yes_terms = pd.DataFrame({"term": terms[top_yes_idx], "score": diff[top_yes_idx]})
+    top_no_terms  = pd.DataFrame({"term": terms[top_no_idx],  "score": -diff[top_no_idx]})
+
+    # Logistic regression drivers
+    try:
+        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
+        clf = LogisticRegression(max_iter=400)
+        clf.fit(X_tr, y_tr)
+        acc = float(clf.score(X_te, y_te))
+        coef = clf.coef_.ravel()
+
+        drv_yes_idx = np.argsort(coef)[-top_n:][::-1]
+        drv_no_idx  = np.argsort(coef)[:top_n]
+
+        drivers_yes = pd.DataFrame({"term": terms[drv_yes_idx], "weight": coef[drv_yes_idx]})
+        drivers_no  = pd.DataFrame({"term": terms[drv_no_idx],  "weight": coef[drv_no_idx]})
+    except Exception:
+        acc = 0.0
+        clf = None
+        drivers_yes = pd.DataFrame()
+        drivers_no  = pd.DataFrame()
+
+    return top_yes_terms, top_no_terms, drivers_yes, drivers_no, acc, tfidf, clf
+
+
+# -----------------------------
+# Derived Stats (Non-Tech KPIs)
 # -----------------------------
 df["label"] = (df["would_apply"].str.lower() == "yes").astype(int)
 yes_pct = 100 * df["label"].mean()
@@ -45,10 +143,12 @@ no_pct = 100 - yes_pct
 avg_len = df["rationale"].apply(lambda s: len(str(s).split())).mean()
 autofixed_pct = 100 * df["auto_fixed"].astype(str).str.lower().eq("yes").mean()
 
+
 # -----------------------------
 # Tabs
 # -----------------------------
 tab_overview, tab_tech = st.tabs(["Non-Technical", "Technical"])
+
 
 # ======================================================
 # 🟢 NON-TECHNICAL TAB
@@ -63,87 +163,82 @@ with tab_overview:
 
     st.markdown("---")
 
-    # =========================
-    # Quick visuals for execs
-    # =========================
+    # Donut + bars
     st.subheader("Overall outcome")
     yes_count = int((df["would_apply"] == "yes").sum())
     no_count  = int((df["would_apply"] == "no").sum())
-
     donut_df = pd.DataFrame({"Decision": ["Yes", "No"], "Count": [yes_count, no_count]})
-    fig_donut = px.pie(donut_df, names="Decision", values="Count", hole=0.55,
-                       title="Would Apply — Yes vs No")
-    st.plotly_chart(fig_donut)
+    st.plotly_chart(px.pie(donut_df, names="Decision", values="Count", hole=0.55,
+                           title="Would Apply — Yes vs No"))
 
     st.subheader("Yes % by Academic Background", anchor="yes-by-academic-background")
     yes_by_bg = (
-        df.groupby("academic_background")["label"]
-          .mean().mul(100).sort_values(ascending=True)
-          .reset_index().rename(columns={"label": "Yes %"})
+        df.groupby("academic_background")["label"].mean().mul(100).reset_index().rename(columns={"label": "Yes %"})
     )
     yes_by_bg = yes_by_bg.sort_values("Yes %", ascending=False)
-    
-    fig_bg = px.bar( yes_by_bg, x="academic_background", y="Yes %", color="Yes %",
-                    color_continuous_scale="Blues",title="Likelihood to Apply by Background")
-    fig_bg.update_layout( xaxis_title="Academic Background", yaxis_title="Yes %", 
-                         xaxis_tickangle=-45, showlegend=False,) 
-    st.plotly_chart(fig_bg)
-    
+    st.plotly_chart(px.bar(yes_by_bg, x="academic_background", y="Yes %",
+                           color="Yes %", color_continuous_scale="Blues",
+                           title="Likelihood to Apply by Background").update_layout(
+                               xaxis_title="Academic Background", yaxis_title="Yes %",
+                               xaxis_tickangle=-45, showlegend=False))
+
     st.subheader("Yes % by Work Experience")
     yes_by_exp = (
-        df.groupby("previous_work_experience")["label"]
-          .mean().mul(100).reset_index()
-          .rename(columns={"label": "Yes %", "previous_work_experience": "Work Experience"})
+        df.groupby("previous_work_experience")["label"].mean().mul(100).reset_index()
+        .rename(columns={"label": "Yes %", "previous_work_experience": "Work Experience"})
     )
-    fig_exp = px.bar(yes_by_exp, x="Work Experience", y="Yes %",
-                     title="Work Experience Effect")
-    st.plotly_chart(fig_exp)
+    st.plotly_chart(px.bar(yes_by_exp, x="Work Experience", y="Yes %",
+                           title="Work Experience Effect"))
 
     st.markdown("---")
 
-    # =========================
-    # --- Filter & Explore (three-field filter) ---
-    st.subheader("Filter & Explore")
+    # Word clouds
+    st.subheader("Common rationale keywords")
+    col_wc1, col_wc2 = st.columns(2)
+    yes_text = " ".join(df.loc[df["would_apply"] == "yes", "rationale"])
+    no_text  = " ".join(df.loc[df["would_apply"] == "no",  "rationale"])
 
-    # Ensure clean string columns for filters
+    with col_wc1:
+        st.caption("🟢 Yes rationales")
+        if yes_text.strip():
+            wc_yes = WordCloud(width=800, height=450, background_color="white").generate(yes_text)
+            fig, ax = plt.subplots()
+            ax.imshow(wc_yes, interpolation="bilinear"); ax.axis("off")
+            st.pyplot(fig, use_container_width=False)
+        else:
+            st.info("No Yes rationales available to render.")
+
+    with col_wc2:
+        st.caption("🔴 No rationales")
+        if no_text.strip():
+            wc_no = WordCloud(width=800, height=450, background_color="white").generate(no_text)
+            fig, ax = plt.subplots()
+            ax.imshow(wc_no, interpolation="bilinear"); ax.axis("off")
+            st.pyplot(fig, use_container_width=False)
+        else:
+            st.info("No No rationales available to render.")
+
+    st.markdown("---")
+
+    # Filterable table
+    st.subheader("Filter & Explore")
     df["_background"] = df["academic_background"].astype(str)
     df["_experience"] = df["previous_work_experience"].astype(str)
     df["_apply"] = df["would_apply"].astype(str).str.lower()
 
     colf1, colf2, colf3, colf4 = st.columns([1, 1, 1, 0.5])
-
     with colf1:
-        bg_sel = st.multiselect(
-            "Academic background",
-            options=sorted(df["_background"].unique().tolist()),
-            default=[],
-            help="Select one or more backgrounds; leave empty for all."
-        )
-
+        bg_sel = st.multiselect("Academic background", sorted(df["_background"].unique().tolist()))
     with colf2:
-        exp_sel = st.multiselect(
-            "Previous work experience",
-            options=sorted(df["_experience"].unique().tolist()),
-            default=[],
-            help="Select Yes/No (or leave empty for all)."
-        )
-
+        exp_sel = st.multiselect("Previous work experience", sorted(df["_experience"].unique().tolist()))
     with colf3:
-        apply_sel = st.multiselect(
-            "Would apply",
-            options=["yes", "no"],
-            default=[],
-            help="Filter by decision; leave empty for all."
-        )
-
+        apply_sel = st.multiselect("Would apply", ["yes", "no"])
     with colf4:
         reset = st.button("Reset filters")
 
-    # Apply filters
     view = df.copy()
     if reset:
         bg_sel, exp_sel, apply_sel = [], [], []
-
     if bg_sel:
         view = view[view["_background"].isin(bg_sel)]
     if exp_sel:
@@ -151,28 +246,119 @@ with tab_overview:
     if apply_sel:
         view = view[view["_apply"].isin([a.lower() for a in apply_sel])]
 
-    # Drop helper cols from display
     display_cols = [c for c in view.columns if c not in ["_background", "_experience", "_apply"]]
-
-    # Summary + table
     st.caption(f"Showing {len(view):,} of {len(df):,} rows")
-    st.dataframe(view[display_cols], width="stretch")  # (Streamlit: width replaces use_container_width)
-
-    # Download exactly what’s shown
+    st.dataframe(view[display_cols], width="stretch")
     st.download_button(
-        label="Download filtered CSV",
+        "Download filtered CSV",
         data=view[display_cols].to_csv(index=False).encode("utf-8"),
         file_name="decisions_filtered.csv",
         mime="text/csv",
     )
 
+
 # ======================================================
-# 🧪 TECHNICAL TAB (stub for now)
+# 🧪 TECHNICAL TAB
 # ======================================================
 with tab_tech:
-    st.subheader("Raw Data Preview")
-    st.dataframe(df.head(50), width="stretch")
-    st.caption("TF-IDF, drivers, overlaps, and program influence will appear here next.")
+    st.subheader("Deep Dive: Tokens, Drivers, and Overlap")
+
+    # --- Overlap section
+    st.markdown("**Profile ↔ Rationale Overlap**")
+    df_overlap = compute_overlap_cols(df)
+    avg_overlap = df_overlap.groupby("would_apply")["overlap_count"].mean().round(2).to_dict()
+    st.write("Average overlap tokens by decision:", avg_overlap)
+
+    st.dataframe(
+        df_overlap[["academic_background","previous_work_experience","would_apply","overlap_tokens","overlap_count"]]
+        .sort_values("overlap_count", ascending=False)
+        .head(40),
+        width="stretch"
+    )
+    st.download_button(
+        "Download overlap sample (CSV)",
+        data=df_overlap.nlargest(200, "overlap_count")[["academic_background","previous_work_experience","would_apply","overlap_tokens","overlap_count"]]
+            .to_csv(index=False).encode("utf-8"),
+        file_name="overlap_top200.csv",
+        mime="text/csv",
+    )
+
+    st.markdown("---")
+
+    # --- TF-IDF & Logistic drivers
+    st.markdown("**Keyword Signals**")
+    colcfg1, colcfg2, colcfg3 = st.columns(3)
+    ngram_opt = colcfg1.selectbox("n-grams", ["1", "1-2"], index=1)
+    ngrams = (1, 2) if ngram_opt == "1-2" else (1, 1)
+    min_df = colcfg2.slider("min_df (ignore rare tokens)", 1, 10, 3, 1)
+    top_n  = colcfg3.slider("Top-N terms", 10, 50, 30, 5)
+
+    top_yes, top_no, drv_yes, drv_no, acc, vec, clf = tfidf_and_drivers(
+        df["profile_text"].astype(str).tolist(),
+        df["label"].values,
+        ngrams=ngrams, min_df=min_df, top_n=top_n
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write("**Characteristic of YES (TF-IDF diff)**")
+        st.dataframe(top_yes.head(top_n), width="stretch")
+        st.download_button(
+            "Download TF-IDF YES terms",
+            data=top_yes.to_csv(index=False).encode("utf-8"),
+            file_name="tfidf_yes_terms.csv",
+            mime="text/csv",
+        )
+    with c2:
+        st.write("**Characteristic of NO (TF-IDF diff)**")
+        st.dataframe(top_no.head(top_n), width="stretch")
+        st.download_button(
+            "Download TF-IDF NO terms",
+            data=top_no.to_csv(index=False).encode("utf-8"),
+            file_name="tfidf_no_terms.csv",
+            mime="text/csv",
+        )
+
+    c3, c4 = st.columns(2)
+    with c3:
+        st.write("**Push toward YES (LogReg coefficients)**")
+        st.dataframe(drv_yes.head(top_n), width="stretch")
+        st.download_button(
+            "Download YES drivers",
+            data=drv_yes.to_csv(index=False).encode("utf-8"),
+            file_name="drivers_yes.csv",
+            mime="text/csv",
+        )
+    with c4:
+        st.write("**Push toward NO (LogReg coefficients)**")
+        st.dataframe(drv_no.head(top_n), width="stretch")
+        st.download_button(
+            "Download NO drivers",
+            data=drv_no.to_csv(index=False).encode("utf-8"),
+            file_name="drivers_no.csv",
+            mime="text/csv",
+        )
+
+    st.caption(f"Logistic Regression holdout accuracy (sanity check): **{acc:.3f}**")
+
+    st.markdown("---")
+
+    # --- Per-profile mini explain
+    st.markdown("**Per-Profile Explain**")
+    idx = st.number_input("Row index", min_value=0, max_value=max(0, len(df_overlap) - 1), value=0, step=1)
+    row = df_overlap.iloc[int(idx)]
+    st.write("**Would apply:**", row["would_apply"])
+    st.write("**Rationale:**")
+    st.code(row["rationale"])
+    st.write("**Overlap tokens:**", ", ".join(row["overlap_tokens"]) if row["overlap_tokens"] else "—")
+
+    if vec is not None and clf is not None:
+        X_row = vec.transform([str(row["profile_text"])])
+        prob_yes = float(clf.predict_proba(X_row)[0, 1])
+        st.write(f"**Model score (YES probability):** {prob_yes:.3f}")
+    else:
+        st.info("Model not available for scoring with current settings (dataset too small or config too strict).")
+
 
 # Footer
 st.caption("Data source: data/decisions_enriched.csv • Student Apply-Insight Portal")

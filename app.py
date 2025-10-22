@@ -62,7 +62,7 @@ df = load_df(CSV_PATH)
 
 
 # -----------------------------
-# Helpers for the TECH tab
+# Helpers (TECH tab)
 # -----------------------------
 def _norm_tokens(s: str) -> list[str]:
     return re.findall(r"[a-z0-9\-]+", str(s).lower())
@@ -132,6 +132,20 @@ def tfidf_and_drivers(
         drivers_no  = pd.DataFrame()
 
     return top_yes_terms, top_no_terms, drivers_yes, drivers_no, acc, tfidf, clf
+
+def summarize_group(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
+    g = (
+        df.groupby(group_col)
+          .agg(
+              rows=("label","size"),
+              yes_rate=("label","mean"),
+              avg_prob_yes=("prob_yes","mean")
+          )
+          .reset_index()
+    )
+    g["yes_rate"] = (g["yes_rate"] * 100).round(2)
+    g["avg_prob_yes"] = g["avg_prob_yes"].round(3)
+    return g.sort_values("avg_prob_yes", ascending=False)
 
 
 # -----------------------------
@@ -372,21 +386,79 @@ with tab_tech:
 
     st.markdown("---")
 
-    # --- Per-profile mini explain
-    st.markdown("**Per-Profile Explain**")
-    idx = st.number_input("Row index", min_value=0, max_value=max(0, len(df_overlap) - 1), value=0, step=1)
-    row = df_overlap.iloc[int(idx)]
-    st.write("**Would apply:**", row["would_apply"])
-    st.write("**Rationale:**")
-    st.code(row["rationale"])
-    st.write("**Overlap tokens:**", ", ".join(row["overlap_tokens"]) if row["overlap_tokens"] else "—")
-
+    # =========================
+    # Model probability per profile
+    # =========================
+    st.markdown("### Model Probability (per profile)")
     if vec is not None and clf is not None:
-        X_row = vec.transform([str(row["profile_text"])])
-        prob_yes = float(clf.predict_proba(X_row)[0, 1])
-        st.write(f"**Model score (YES probability):** {prob_yes:.3f}")
+        # Compute prob_yes for ALL rows and attach to df
+        X_all = vec.transform(df["profile_text"].astype(str).tolist())
+        df["prob_yes"] = clf.predict_proba(X_all)[:, 1]
+        df["prob_no"] = 1 - df["prob_yes"]
+
+        # Histogram of model confidence
+        st.subheader("Distribution of YES probabilities")
+        fig_prob = px.histogram(df, x="prob_yes", nbins=20, title="Model confidence: P(YES)")
+        fig_prob.update_layout(xaxis_title="P(YES)", yaxis_title="Count")
+        st.plotly_chart(fig_prob)
+
+        # Preview tables: most confident
+        st.subheader("Most confident profiles")
+        c_yes, c_no = st.columns(2)
+        with c_yes:
+            st.caption("🟢 Highest P(YES)")
+            st.dataframe(
+                df.sort_values("prob_yes", ascending=False)
+                  .head(20)[["academic_background","previous_work_experience","would_apply","prob_yes","rationale"]],
+                width="stretch"
+            )
+        with c_no:
+            st.caption("🔴 Lowest P(YES)")
+            st.dataframe(
+                df.sort_values("prob_yes", ascending=True)
+                  .head(20)[["academic_background","previous_work_experience","would_apply","prob_yes","rationale"]],
+                width="stretch"
+            )
+
+        # Group summaries + downloads
+        st.markdown("---")
+        st.subheader("Average model probability by group")
+
+        cols = st.columns(2)
+        with cols[0]:
+            if "academic_background" in df.columns:
+                g_bg = summarize_group(df, "academic_background")
+                st.write("**By Academic Background**")
+                st.dataframe(g_bg, width="stretch")
+                st.download_button(
+                    "Download summary (background)",
+                    data=g_bg.to_csv(index=False).encode("utf-8"),
+                    file_name="avg_prob_by_background.csv",
+                    mime="text/csv",
+                )
+        with cols[1]:
+            if "previous_work_experience" in df.columns:
+                g_exp = summarize_group(df, "previous_work_experience")
+                st.write("**By Work Experience**")
+                st.dataframe(g_exp, width="stretch")
+                st.download_button(
+                    "Download summary (experience)",
+                    data=g_exp.to_csv(index=False).encode("utf-8"),
+                    file_name="avg_prob_by_experience.csv",
+                    mime="text/csv",
+                )
+
+        # Full enriched CSV download
+        st.markdown("---")
+        st.subheader("Download enriched data")
+        st.download_button(
+            "Download decisions with probabilities (CSV)",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name="decisions_with_probs.csv",
+            mime="text/csv",
+        )
     else:
-        st.info("Model not available for scoring with current settings (dataset too small or config too strict).")
+        st.info("Model not available for probability scoring with current settings.")
 
 
 # Footer

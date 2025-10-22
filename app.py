@@ -1,4 +1,4 @@
-# app.py — Student Apply-Insight Portal (no auto-fixed; phrase analytics)
+# app.py — Student Apply-Insight Portal (distinctive phrases, no auto-fixed)
 
 from pathlib import Path
 import re
@@ -8,10 +8,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-import matplotlib.pyplot as plt
 
 # ML
-from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer, ENGLISH_STOP_WORDS
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 
@@ -61,7 +60,7 @@ def load_df(path: Path) -> pd.DataFrame:
 df = load_df(CSV_PATH)
 
 # -----------------------------
-# Helpers (TECH tab + phrases)
+# Helpers (TECH / phrases)
 # -----------------------------
 def _norm_tokens(s: str) -> list[str]:
     return re.findall(r"[a-z0-9\-]+", str(s).lower())
@@ -138,48 +137,64 @@ def summarize_group(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     g["avg_prob_yes"] = g["avg_prob_yes"].round(3)
     return g.sort_values("avg_prob_yes", ascending=False)
 
-# ---------- Rationale analytics helpers ----------
+# ==== Distinctive phrase extraction (TF-IDF contrast) ====
 DOMAIN_STOP = {
-    # generic program words
+    # generic & filler
     "program","university","degree","course","ms","master","saint","louis",
-    "united","states","online","format","curriculum","offer","offers",
-    # filler
-    "think","feel","feels","going","like","well","closely","based",
+    "online","format","curriculum","offer","offers","united","states",
+    "think","feel","feels","going","like","well","closely","based","right","it",
+    "align","aligns","aligned","alignment","fit","fits","fitting","suit","suits",
+    "with","my","the","in","for","to","and","or","of","at","on","by","as",
+    # domain-generic words that appear in both classes a lot
+    "analytics","data","background","interests","professional","academic"
 }
-def _prep_rationale(s: pd.Series) -> list[str]:
-    return s.fillna("").astype(str).str.lower().tolist()
 
-def top_ngrams_by_class(df_in: pd.DataFrame, label_col: str, text_col: str,
-                        y_value: str, ngram_range=(2,3), top_n=15,
-                        extra_stop=set()) -> pd.DataFrame:
-    texts = _prep_rationale(df_in.loc[df_in[label_col] == y_value, text_col])
-    if len(texts) == 0:
-        return pd.DataFrame(columns=["phrase","count"])
-    stop = set(extra_stop) | DOMAIN_STOP
-    vec = CountVectorizer(ngram_range=ngram_range, stop_words=list(stop), min_df=1)
+def _has_content_word(phrase: str, stop: set[str]) -> bool:
+    for tok in phrase.split():
+        t = "".join(ch for ch in tok if ch.isalpha())
+        if len(t) >= 4 and t not in stop:
+            return True
+    return False
+
+@st.cache_data(show_spinner=False)
+def class_distinctive_phrases(
+    df_in: pd.DataFrame,
+    label_col="would_apply",
+    text_col="rationale",
+    ngram_range=(2,3),
+    min_df=3,
+    top_n=15,
+    extra_stop=None,
+):
+    stop = set(ENGLISH_STOP_WORDS) | DOMAIN_STOP | set(extra_stop or [])
+    texts = df_in[text_col].fillna("").astype(str).str.lower().tolist()
+    y = df_in[label_col].astype(str).str.lower().tolist()
+
+    vec = TfidfVectorizer(ngram_range=ngram_range, min_df=min_df, stop_words=list(stop))
     X = vec.fit_transform(texts)
-    counts = X.sum(axis=0).A1
-    phrases = np.array(vec.get_feature_names_out())
-    order = counts.argsort()[::-1][:top_n]
-    return pd.DataFrame({"phrase": phrases[order], "count": counts[order]})
+    terms = vec.get_feature_names_out()
 
-def highlight_phrases(text: str, phrases: list[str]) -> str:
-    import re as _re
-    t = text
-    for p in sorted(phrases, key=len, reverse=True)[:10]:
-        pattern = _re.compile(_re.escape(p), _re.IGNORECASE)
-        t = pattern.sub(f"<mark>{p}</mark>", t)
-    return t
+    y_arr = np.array(y)
+    yes_mask = (y_arr == "yes")
+    no_mask  = (y_arr == "no")
 
-def tag_rationale(s: str) -> list[str]:
-    s = (s or "").lower()
-    tags = []
-    if any(k in s for k in ["fit","align","match","suits","relevant"]): tags.append("fit")
-    if any(k in s for k in ["not fit","mismatch","different field","unrelated"]): tags.append("mismatch")
-    if any(k in s for k in ["deadline","time","october","soon","close"]): tags.append("deadline")
-    if any(k in s for k in ["experience","worked","intern","job"]): tags.append("experience")
-    if any(k in s for k in ["skills","learn","deepen","build skills"]): tags.append("skills")
-    return tags
+    if yes_mask.sum() == 0 or no_mask.sum() == 0:
+        return (pd.DataFrame(columns=["phrase","score"]), pd.DataFrame(columns=["phrase","score"]))
+
+    yes_mean = X[yes_mask].mean(axis=0).A1
+    no_mean  = X[no_mask].mean(axis=0).A1
+    diff = yes_mean - no_mean  # positive => YES distinctive
+
+    keep = np.array([_has_content_word(t, stop) for t in terms])
+    terms_f = terms[keep]
+    diff_f  = diff[keep]
+
+    idx_yes = diff_f.argsort()[::-1][:top_n]
+    top_yes = pd.DataFrame({"phrase": terms_f[idx_yes], "score": diff_f[idx_yes]})
+
+    idx_no = diff_f.argsort()[:top_n]
+    top_no = pd.DataFrame({"phrase": terms_f[idx_no], "score": (-diff_f[idx_no])})
+    return top_yes, top_no
 
 # -----------------------------
 # Derived Stats (Non-Tech KPIs)
@@ -198,7 +213,7 @@ tab_overview, tab_tech = st.tabs(["Non-Technical", "Technical"])
 # 🟢 NON-TECHNICAL TAB
 # ======================================================
 with tab_overview:
-    # KPI tiles (no auto-fixed)
+    # KPI tiles
     c1, c2, c3 = st.columns(3)
     c1.metric("Yes %", f"{yes_pct:.1f}%")
     c2.metric("No %", f"{no_pct:.1f}%")
@@ -206,7 +221,7 @@ with tab_overview:
 
     st.markdown("---")
 
-    # Overall outcome
+    # Outcome donut
     st.subheader("Overall outcome")
     yes_count = int((df["would_apply"] == "yes").sum())
     no_count  = int((df["would_apply"] == "no").sum())
@@ -237,97 +252,59 @@ with tab_overview:
 
     st.markdown("---")
 
-    # 🔁 NEW: Phrase analytics instead of wordclouds
-    st.subheader("Common rationale keywords (phrases)")
+    # 🔁 Distinctive phrases (TF-IDF contrast)
+    st.subheader("Common rationale keywords (distinctive phrases)")
     col_a, col_b = st.columns(2)
 
-    top_yes_ph = top_ngrams_by_class(df, "would_apply", "rationale", "yes",
-                                     ngram_range=(2,3), top_n=15, extra_stop=set())
-    top_no_ph  = top_ngrams_by_class(df, "would_apply", "rationale", "no",
-                                     ngram_range=(2,3), top_n=15, extra_stop=set())
+    top_yes_ph, top_no_ph = class_distinctive_phrases(
+        df,
+        label_col="would_apply",
+        text_col="rationale",
+        ngram_range=(2,3),
+        min_df=3,      # increase to 4–5 to suppress fluff further
+        top_n=15,
+        extra_stop=set()
+    )
 
     with col_a:
-        st.caption("🟢 Frequent phrases in YES rationales")
+        st.caption("🟢 Distinctive phrases for YES")
         if not top_yes_ph.empty:
-            fig_yes_ph = px.bar(top_yes_ph.iloc[::-1], x="count", y="phrase",
-                                orientation="h", title="Top phrases (YES)")
-            fig_yes_ph.update_layout(yaxis_title="", xaxis_title="Count")
+            fig_yes_ph = px.bar(
+                top_yes_ph.iloc[::-1], x="score", y="phrase",
+                orientation="h", title="YES-class distinctive phrases (TF-IDF Δ)"
+            )
+            fig_yes_ph.update_layout(yaxis_title="", xaxis_title="Distinctiveness")
             st.plotly_chart(fig_yes_ph)
             st.download_button(
-                "Download YES phrases (CSV)",
+                "Download YES distinctive phrases (CSV)",
                 data=top_yes_ph.to_csv(index=False).encode("utf-8"),
-                file_name="yes_rationale_phrases.csv",
+                file_name="yes_distinctive_phrases.csv",
                 mime="text/csv",
             )
         else:
-            st.info("No YES rationales available.")
+            st.info("Not enough YES rationales to extract distinctive phrases.")
 
     with col_b:
-        st.caption("🔴 Frequent phrases in NO rationales")
+        st.caption("🔴 Distinctive phrases for NO")
         if not top_no_ph.empty:
-            fig_no_ph = px.bar(top_no_ph.iloc[::-1], x="count", y="phrase",
-                               orientation="h", title="Top phrases (NO)")
-            fig_no_ph.update_layout(yaxis_title="", xaxis_title="Count")
+            fig_no_ph = px.bar(
+                top_no_ph.iloc[::-1], x="score", y="phrase",
+                orientation="h", title="NO-class distinctive phrases (TF-IDF Δ)"
+            )
+            fig_no_ph.update_layout(yaxis_title="", xaxis_title="Distinctiveness")
             st.plotly_chart(fig_no_ph)
             st.download_button(
-                "Download NO phrases (CSV)",
+                "Download NO distinctive phrases (CSV)",
                 data=top_no_ph.to_csv(index=False).encode("utf-8"),
-                file_name="no_rationale_phrases.csv",
+                file_name="no_distinctive_phrases.csv",
                 mime="text/csv",
             )
         else:
-            st.info("No NO rationales available.")
+            st.info("Not enough NO rationales to extract distinctive phrases.")
 
     st.markdown("---")
 
-    # Representative rationales with highlights + simple theme tags
-    st.subheader("Representative rationales (with highlights)")
-    yes_phr_list = top_yes_ph["phrase"].head(10).tolist() if not top_yes_ph.empty else []
-    no_phr_list  = top_no_ph["phrase"].head(10).tolist() if not top_no_ph.empty else []
-
-    c_yes, c_no = st.columns(2)
-
-    with c_yes:
-        st.caption("🟢 YES examples")
-        view_yes = df[df["would_apply"]=="yes"].copy()
-        if "prob_yes" in df.columns:
-            view_yes = view_yes.sort_values("prob_yes", ascending=False).head(5)
-        else:
-            view_yes = view_yes.head(5)
-        for _, r in view_yes.iterrows():
-            html = highlight_phrases(str(r["rationale"]), yes_phr_list)
-            tags = ", ".join(tag_rationale(r["rationale"]))
-            st.markdown(
-                f"- **Background:** {r.get('academic_background','—')}  \n"
-                f"  *{r.get('previous_work_experience','—')}*  \n"
-                + (f"  **P(YES): {r['prob_yes']:.2f}**  \n" if 'prob_yes' in r else "")
-                + (f"  _tags: {tags}_  \n" if tags else "")
-                + f"  <div style='margin-top:4px'>{html}</div>",
-                unsafe_allow_html=True
-            )
-
-    with c_no:
-        st.caption("🔴 NO examples")
-        view_no = df[df["would_apply"]=="no"].copy()
-        if "prob_yes" in df.columns:
-            view_no = view_no.sort_values("prob_yes", ascending=True).head(5)
-        else:
-            view_no = view_no.head(5)
-        for _, r in view_no.iterrows():
-            html = highlight_phrases(str(r["rationale"]), no_phr_list)
-            tags = ", ".join(tag_rationale(r["rationale"]))
-            st.markdown(
-                f"- **Background:** {r.get('academic_background','—')}  \n"
-                f"  *{r.get('previous_work_experience','—')}*  \n"
-                + (f"  **P(YES): {r['prob_yes']:.2f}**  \n" if 'prob_yes' in r else "")
-                + (f"  _tags: {tags}_  \n" if tags else "")
-                + f"  <div style='margin-top:4px'>{html}</div>",
-                unsafe_allow_html=True
-            )
-
-    st.markdown("---")
-
-    # Filterable table (3-field filter)
+    # Filterable table
     st.subheader("Filter & Explore")
     df["_background"] = df["academic_background"].astype(str)
     df["_experience"] = df["previous_work_experience"].astype(str)
@@ -390,7 +367,7 @@ with tab_tech:
 
     st.markdown("---")
 
-    # Keyword Signals
+    # Keyword Signals & Drivers
     st.markdown("### Keyword Signals")
     st.caption("TF-IDF class signatures (Yes/No) + Logistic Regression drivers.")
 

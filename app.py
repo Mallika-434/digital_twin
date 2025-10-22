@@ -59,8 +59,9 @@ def load_df(path: Path) -> pd.DataFrame:
     return df
 
 df = load_df(CSV_PATH)
-
-
+if "auto_fixed" in df.columns:
+    df.drop(columns=["auto_fixed"], inplace=True)
+    
 # -----------------------------
 # Helpers (TECH tab)
 # -----------------------------
@@ -155,7 +156,6 @@ df["label"] = (df["would_apply"].str.lower() == "yes").astype(int)
 yes_pct = 100 * df["label"].mean()
 no_pct = 100 - yes_pct
 avg_len = df["rationale"].apply(lambda s: len(str(s).split())).mean()
-autofixed_pct = 100 * df["auto_fixed"].astype(str).str.lower().eq("yes").mean()
 
 
 # -----------------------------
@@ -173,8 +173,7 @@ with tab_overview:
     c1.metric("Yes %", f"{yes_pct:.1f}%")
     c2.metric("No %", f"{no_pct:.1f}%")
     c3.metric("Avg rationale words", f"{avg_len:.1f}")
-    c4.metric("% auto-fixed", f"{autofixed_pct:.1f}%")
-
+    
     st.markdown("---")
 
     # Donut + bars

@@ -226,13 +226,40 @@ with tab_overview:
         view = view[view["_apply"].isin(apply_sel)]
 
     display_cols = [c for c in view.columns if c not in ["_background", "_experience", "_apply"]]
-    st.caption(f"Showing {len(view):,} of {len(df):,} rows")
+    # Summary text
+    st.caption(f"Showing {len(view):,} of {len(df):,} total rows")
+    # --- NEW: Dynamic Yes/No percentage chart ---
+    if len(view) > 0:
+        yes_count = (view["would_apply"].str.lower() == "yes").sum()
+        no_count = (view["would_apply"].str.lower() == "no").sum()
+        pct_yes = (yes_count / len(view)) * 100 if len(view) > 0 else 0
+        pct_no = (no_count / len(view)) * 100 if len(view) > 0 else 0
+        
+        chart_df = pd.DataFrame({
+            "Decision": ["Yes", "No"],
+            "Percentage": [pct_yes, pct_no]
+        })
+        
+        st.plotly_chart(
+            px.bar(
+                chart_df,
+                x="Decision", y="Percentage", color="Decision",
+                color_discrete_map={"Yes": "green", "No": "red"},
+                text_auto=".1f",
+                title="Filtered Yes/No Percentage"
+            ).update_layout(yaxis_title="%", xaxis_title="", showlegend=False),
+            use_container_width=True
+        )
+    else:
+        st.info("No matching records for the selected filters.")
+
+    # --- Existing Data Table ---
     if "prob_yes" in view:
         styled = view[display_cols].style.format({"prob_yes": "{:.2f}"}).background_gradient(subset=["prob_yes"], cmap="Greens")
         st.dataframe(styled, use_container_width=True)
     else:
-        st.dataframe(view[display_cols], width="stretch")
-
+        st.dataframe(view[display_cols], use_container_width=True)
+        
 # =================================================
 # 🧪 TECHNICAL TAB
 # =================================================

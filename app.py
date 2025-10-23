@@ -1,4 +1,4 @@
-# app.py — Student Apply-Insight Portal (distinctive phrases, no auto-fixed)
+# app.py — Student Apply-Insight Portal (drivers-only TECH tab)
 
 from pathlib import Path
 import re
@@ -39,11 +39,11 @@ def load_df(path: Path) -> pd.DataFrame:
     df["label"] = (df["would_apply"] == "yes").astype(int)
     df["rationale"] = df["rationale"].fillna("").astype(str)
 
-    # Auto-drop auto_fixed if present
+    # Drop legacy column if it exists
     if "auto_fixed" in df.columns:
         df.drop(columns=["auto_fixed"], inplace=True)
 
-    # Build profile_text if missing
+    # Build profile_text if missing (used for modeling)
     if "profile_text" not in df.columns:
         def build_profile_text(r):
             return (
@@ -60,7 +60,7 @@ def load_df(path: Path) -> pd.DataFrame:
 df = load_df(CSV_PATH)
 
 # -----------------------------
-# Helpers (TECH / phrases)
+# Helpers
 # -----------------------------
 def _norm_tokens(s: str) -> list[str]:
     return re.findall(r"[a-z0-9\-]+", str(s).lower())
@@ -84,24 +84,17 @@ def tfidf_and_drivers(
     min_df: int = 3,
     top_n: int = 30,
 ):
+    """
+    Fit TF-IDF + Logistic Regression; return only drivers & accuracy.
+    """
     tfidf = TfidfVectorizer(ngram_range=ngrams, min_df=min_df, stop_words="english")
     try:
         X = tfidf.fit_transform(texts)
     except ValueError:
-        return (pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), 0.0, None, None)
+        return (pd.DataFrame(), pd.DataFrame(), 0.0, None, None)
 
     terms = np.array(tfidf.get_feature_names_out())
     y = np.asarray(labels)
-
-    yes_mean = X[y == 1].mean(axis=0)
-    no_mean  = X[y == 0].mean(axis=0)
-    diff = np.asarray(yes_mean - no_mean).ravel()
-
-    top_yes_idx = diff.argsort()[::-1][:top_n]
-    top_no_idx  = diff.argsort()[:top_n]
-
-    top_yes_terms = pd.DataFrame({"term": terms[top_yes_idx], "score": diff[top_yes_idx]})
-    top_no_terms  = pd.DataFrame({"term": terms[top_no_idx],  "score": -diff[top_no_idx]})
 
     try:
         X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
@@ -121,7 +114,7 @@ def tfidf_and_drivers(
         drivers_yes = pd.DataFrame()
         drivers_no  = pd.DataFrame()
 
-    return top_yes_terms, top_no_terms, drivers_yes, drivers_no, acc, tfidf, clf
+    return drivers_yes, drivers_no, acc, tfidf, clf
 
 def summarize_group(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     g = (
@@ -137,7 +130,7 @@ def summarize_group(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     g["avg_prob_yes"] = g["avg_prob_yes"].round(3)
     return g.sort_values("avg_prob_yes", ascending=False)
 
-# ==== Distinctive phrase extraction (TF-IDF contrast) ====
+# ==== Distinctive phrase extraction for Non-Technical tab ====
 DOMAIN_STOP = {
     # generic & filler
     "program","university","degree","course","ms","master","saint","louis",
@@ -145,7 +138,7 @@ DOMAIN_STOP = {
     "think","feel","feels","going","like","well","closely","based","right","it",
     "align","aligns","aligned","alignment","fit","fits","fitting","suit","suits",
     "with","my","the","in","for","to","and","or","of","at","on","by","as",
-    # domain-generic words that appear in both classes a lot
+    # domain-generic that show up in both classes
     "analytics","data","background","interests","professional","academic"
 }
 
@@ -183,7 +176,7 @@ def class_distinctive_phrases(
 
     yes_mean = X[yes_mask].mean(axis=0).A1
     no_mean  = X[no_mask].mean(axis=0).A1
-    diff = yes_mean - no_mean  # positive => YES distinctive
+    diff = yes_mean - no_mean
 
     keep = np.array([_has_content_word(t, stop) for t in terms])
     terms_f = terms[keep]
@@ -201,7 +194,7 @@ def class_distinctive_phrases(
 # -----------------------------
 df["label"] = (df["would_apply"].str.lower() == "yes").astype(int)
 yes_pct = 100 * df["label"].mean()
-no_pct = 100 - yes_pct
+no_pct  = 100 - yes_pct
 avg_len = df["rationale"].apply(lambda s: len(str(s).split())).mean()
 
 # -----------------------------
@@ -252,7 +245,7 @@ with tab_overview:
 
     st.markdown("---")
 
-    # 🔁 Distinctive phrases (TF-IDF contrast)
+    # Distinctive phrases (class contrast)
     st.subheader("Common rationale keywords (distinctive phrases)")
     col_a, col_b = st.columns(2)
 
@@ -261,7 +254,7 @@ with tab_overview:
         label_col="would_apply",
         text_col="rationale",
         ngram_range=(2,3),
-        min_df=3,      # increase to 4–5 to suppress fluff further
+        min_df=3,  # increase to 4–5 to suppress fluff further
         top_n=15,
         extra_stop=set()
     )
@@ -341,12 +334,12 @@ with tab_overview:
     )
 
 # ======================================================
-# 🧪 TECHNICAL TAB
+# 🧪 TECHNICAL TAB — Logistic Regression only (no TF-IDF diff tables)
 # ======================================================
 with tab_tech:
-    st.subheader("Deep Dive: Tokens, Drivers, Overlap & Probabilities")
+    st.subheader("Deep Dive: Drivers, Overlap & Probabilities")
 
-    # Overlap
+    # ---------- Overlap
     st.markdown("**Profile ↔ Rationale Overlap**")
     df_overlap = compute_overlap_cols(df)
     avg_overlap = df_overlap.groupby("would_apply")["overlap_count"].mean().round(2).to_dict()
@@ -367,9 +360,9 @@ with tab_tech:
 
     st.markdown("---")
 
-    # Keyword Signals & Drivers
-    st.markdown("### Keyword Signals")
-    st.caption("TF-IDF class signatures (Yes/No) + Logistic Regression drivers.")
+    # ---------- Logistic Regression Drivers (ONLY)
+    st.markdown("### Logistic Regression Drivers")
+    st.caption("Trained on TF-IDF features internally; we show only the learned drivers (coefficients).")
 
     colcfg1, colcfg2 = st.columns([1, 1])
     ngram_opt = colcfg1.selectbox("n-grams", ["1", "1-2"], index=1)
@@ -377,50 +370,40 @@ with tab_tech:
     top_n = colcfg2.slider("Top-N terms", 10, 50, 30, 5)
 
     FIXED_MIN_DF = 3
-    top_yes, top_no, drv_yes, drv_no, acc, vec, clf = tfidf_and_drivers(
+    drv_yes, drv_no, acc, vec, clf = tfidf_and_drivers(
         df["profile_text"].astype(str).tolist(),
         df["label"].values,
         ngrams=ngrams, min_df=FIXED_MIN_DF, top_n=top_n
     )
     st.caption(f"Logistic holdout accuracy (sanity check): **{acc:.3f}**")
 
-    st.markdown("##### Class Signatures (TF-IDF difference)")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.write("**Characteristic of YES**")
-        st.dataframe(top_yes.head(top_n), width="stretch")
-        st.download_button("Download TF-IDF YES terms",
-                           data=top_yes.to_csv(index=False).encode("utf-8"),
-                           file_name="tfidf_yes_terms.csv", mime="text/csv")
-    with c2:
-        st.write("**Characteristic of NO**")
-        st.dataframe(top_no.head(top_n), width="stretch")
-        st.download_button("Download TF-IDF NO terms",
-                           data=top_no.to_csv(index=False).encode("utf-8"),
-                           file_name="tfidf_no_terms.csv", mime="text/csv")
-
-    st.markdown("---")
-
-    st.markdown("##### Directional Drivers (Logistic Regression coefficients)")
     c3, c4 = st.columns(2)
     with c3:
         st.write("**Push toward YES**")
         st.dataframe(drv_yes.head(top_n), width="stretch")
-        st.download_button("Download YES drivers",
-                           data=drv_yes.to_csv(index=False).encode("utf-8"),
-                           file_name="drivers_yes.csv", mime="text/csv")
+        st.download_button(
+            "Download YES drivers",
+            data=drv_yes.to_csv(index=False).encode("utf-8"),
+            file_name="drivers_yes.csv",
+            mime="text/csv",
+        )
     with c4:
         st.write("**Push toward NO**")
         st.dataframe(drv_no.head(top_n), width="stretch")
-        st.download_button("Download NO drivers",
-                           data=drv_no.to_csv(index=False).encode("utf-8"),
-                           file_name="drivers_no.csv", mime="text/csv")
+        st.download_button(
+            "Download NO drivers",
+            data=drv_no.to_csv(index=False).encode("utf-8"),
+            file_name="drivers_no.csv",
+            mime="text/csv",
+        )
 
     st.markdown("##### Top-10 YES Drivers (visual)")
     if not drv_yes.empty:
         top10_yes = drv_yes.head(10).iloc[::-1]
-        fig_drv = px.bar(top10_yes, x="weight", y="term", orientation="h",
-                         title="Terms that push the model toward a YES decision")
+        fig_drv = px.bar(
+            top10_yes, x="weight", y="term", orientation="h",
+            title="Terms that push the model toward a YES decision"
+        )
         fig_drv.update_layout(xaxis_title="Coefficient weight (↑ = more YES)", yaxis_title="Term")
         st.plotly_chart(fig_drv)
     else:
@@ -428,7 +411,7 @@ with tab_tech:
 
     st.markdown("---")
 
-    # Model probabilities per profile
+    # ---------- Per-profile probabilities
     st.markdown("### Model Probability (per profile)")
     if vec is not None and clf is not None:
         X_all = vec.transform(df["profile_text"].astype(str).tolist())
@@ -459,24 +442,29 @@ with tab_tech:
 
         st.markdown("---")
         st.subheader("Average model probability by group")
-
         cols = st.columns(2)
         with cols[0]:
             if "academic_background" in df.columns:
                 g_bg = summarize_group(df, "academic_background")
                 st.write("**By Academic Background**")
                 st.dataframe(g_bg, width="stretch")
-                st.download_button("Download summary (background)",
-                                   data=g_bg.to_csv(index=False).encode("utf-8"),
-                                   file_name="avg_prob_by_background.csv", mime="text/csv")
+                st.download_button(
+                    "Download summary (background)",
+                    data=g_bg.to_csv(index=False).encode("utf-8"),
+                    file_name="avg_prob_by_background.csv",
+                    mime="text/csv",
+                )
         with cols[1]:
             if "previous_work_experience" in df.columns:
                 g_exp = summarize_group(df, "previous_work_experience")
                 st.write("**By Work Experience**")
                 st.dataframe(g_exp, width="stretch")
-                st.download_button("Download summary (experience)",
-                                   data=g_exp.to_csv(index=False).encode("utf-8"),
-                                   file_name="avg_prob_by_experience.csv", mime="text/csv")
+                st.download_button(
+                    "Download summary (experience)",
+                    data=g_exp.to_csv(index=False).encode("utf-8"),
+                    file_name="avg_prob_by_experience.csv",
+                    mime="text/csv",
+                )
 
         st.markdown("---")
         st.subheader("Download enriched data")

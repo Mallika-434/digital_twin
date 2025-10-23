@@ -225,7 +225,8 @@ with tab_tech:
 
     # Logistic Regression Drivers
     st.markdown("### Logistic Regression Drivers (n-grams = (1, 2))")
-    top_n = st.slider("Top-N terms", 10, 50, 30, 5, help="Control how many top weighted features are shown for each class.")
+    top_n = st.number_input("Top-N terms", min_value=10, max_value=50, value=30, step=1, 
+                            help="Enter how many top weighted terms you want to display (between 10 and 50).")
     drv_yes, drv_no, acc, vec, clf = tfidf_and_drivers(df["profile_text"].astype(str).tolist(), df["label"].values, ngrams=(1,2), min_df=3, top_n=top_n)
     st.caption(f"Logistic holdout accuracy: **{acc:.3f}**")
 

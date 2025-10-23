@@ -1,4 +1,4 @@
-# app.py — Student Apply-Insight Portal (final interactive version)
+# app.py — Student Apply-Insight Portal (Final Version with Tooltips)
 
 from pathlib import Path
 import re
@@ -75,11 +75,21 @@ if prob_yes is not None:
     df["prob_no"]  = 1 - prob_yes
 
 # -------------------------------------------------
-# 4️⃣ Sidebar controls
+# 4️⃣ Sidebar controls (with tooltips)
 # -------------------------------------------------
 st.sidebar.header("Interactive Controls")
-thr = st.sidebar.slider("Decision threshold (P(YES) ≥ …)", 0.0, 1.0, 0.50, 0.01)
-use_predictions = st.sidebar.toggle("Use model predictions instead of original Yes/No", value=False)
+
+thr = st.sidebar.slider(
+    "Decision threshold (P(YES) ≥ …)",
+    0.0, 1.0, 0.50, 0.01,
+    help="Set how confident the model must be before classifying a profile as 'YES'."
+)
+
+use_predictions = st.sidebar.toggle(
+    "Use model predictions instead of original Yes/No",
+    value=False,
+    help="Switch between the LLM's original answers and the logistic model's predictions."
+)
 
 if "prob_yes" in df.columns:
     df["predicted_apply"] = np.where(df["prob_yes"] >= thr, "yes", "no")
@@ -156,51 +166,42 @@ with tab_overview:
     st.plotly_chart(px.pie(donut_df, names="Decision", values="Count", hole=0.55,
                            title=("Predicted Would Apply — Yes vs No" if use_predictions else "Would Apply — Yes vs No")))
 
-    # Yes% by background / experience
-    label_for_group = "pred_label" if use_predictions else "label"
-    yes_by_bg = df.groupby("academic_background")[label_for_group].mean().mul(100).reset_index().rename(columns={label_for_group:"Yes %"})
-    yes_by_exp = df.groupby("previous_work_experience")[label_for_group].mean().mul(100).reset_index().rename(columns={label_for_group:"Yes %"})
-    st.plotly_chart(px.bar(yes_by_bg, x="academic_background", y="Yes %", color="Yes %", color_continuous_scale="Blues").update_layout(xaxis_tickangle=-45))
-    st.plotly_chart(px.bar(yes_by_exp, x="previous_work_experience", y="Yes %", title="Work Experience Effect"))
-
-    # Cohort compare
-    st.markdown("---")
-    st.subheader("Cohort Compare (A/B)")
-    left = st.selectbox("Cohort A", sorted(df["academic_background"].dropna().unique()))
-    right = st.selectbox("Cohort B", sorted(df["academic_background"].dropna().unique()), index=min(1,len(df["academic_background"].unique())-1))
-    A, B = df[df["academic_background"]==left], df[df["academic_background"]==right]
-    c1, c2 = st.columns(2)
-    for block, name, d in [(c1,left,A),(c2,right,B)]:
-        with block:
-            st.markdown(f"**{name}**")
-            st.metric("Rows", len(d))
-            st.metric("Yes %", f"{(100*d[label_for_group].mean() if len(d) else 0):.1f}%")
-            if "prob_yes" in d: st.metric("Avg P(YES)", f"{d['prob_yes'].mean():.2f}")
-            st.dataframe(d[["academic_background","previous_work_experience",dec_col,"prob_yes","rationale"]].head(15), width="stretch")
-
-    # Search
-    st.markdown("---")
-    st.subheader("Quick search")
-    q = st.text_input("Search text (rationale or profile)", "")
-    mask = df["rationale"].str.contains(q, case=False, na=False) | df["profile_text"].str.contains(q, case=False, na=False) if q else np.ones(len(df),bool)
-    found = df[mask].copy()
-    st.caption(f"Matched {len(found):,} rows" + (f" for “{q}”" if q else ""))
-    show_cols = [c for c in ["academic_background","previous_work_experience",dec_col,"prob_yes","rationale"] if c in found.columns]
-    st.dataframe(found.assign(rationale=lambda d: d["rationale"].str.replace(q,f"**{q}**",case=False,regex=False) if q else d["rationale"])[show_cols].head(200), width="stretch")
-
-    # Filter table
+    # Filters with tooltips
     st.markdown("---")
     st.subheader("Filter & Explore")
-    df["_background"], df["_experience"], df["_apply"] = df["academic_background"].astype(str), df["previous_work_experience"].astype(str), df["would_apply"].astype(str)
-    bg_sel = st.multiselect("Academic background", sorted(df["_background"].unique().tolist()))
-    exp_sel = st.multiselect("Previous work experience", sorted(df["_experience"].unique().tolist()))
-    apply_sel = st.multiselect("Would apply", ["yes","no"])
+
+    df["_background"], df["_experience"], df["_apply"] = (
+        df["academic_background"].astype(str),
+        df["previous_work_experience"].astype(str),
+        df["would_apply"].astype(str)
+    )
+
+    bg_sel = st.multiselect(
+        "Academic background",
+        sorted(df["_background"].unique().tolist()),
+        help="Filter data by academic background (e.g., Engineering, History, etc.)"
+    )
+
+    exp_sel = st.multiselect(
+        "Previous work experience",
+        sorted(df["_experience"].unique().tolist()),
+        help="Filter data by whether users have prior work experience."
+    )
+
+    apply_sel = st.multiselect(
+        "Would apply",
+        ["yes","no"],
+        help="Filter data by model or LLM decision outcome."
+    )
+
     view = df.copy()
     if bg_sel: view = view[view["_background"].isin(bg_sel)]
     if exp_sel: view = view[view["_experience"].isin(exp_sel)]
     if apply_sel: view = view[view["_apply"].isin(apply_sel)]
+
     display_cols = [c for c in view.columns if c not in ["_background","_experience","_apply"]]
     st.caption(f"Showing {len(view):,} of {len(df):,} rows")
+
     if "prob_yes" in view:
         styled = view[display_cols].style.format({"prob_yes":"{:.2f}"}).background_gradient(subset=["prob_yes"], cmap="Greens")
         st.dataframe(styled, use_container_width=True)
@@ -224,7 +225,7 @@ with tab_tech:
 
     # Logistic Regression Drivers
     st.markdown("### Logistic Regression Drivers (n-grams = (1, 2))")
-    top_n = st.slider("Top-N terms", 10, 50, 30, 5)
+    top_n = st.slider("Top-N terms", 10, 50, 30, 5, help="Control how many top weighted features are shown for each class.")
     drv_yes, drv_no, acc, vec, clf = tfidf_and_drivers(df["profile_text"].astype(str).tolist(), df["label"].values, ngrams=(1,2), min_df=3, top_n=top_n)
     st.caption(f"Logistic holdout accuracy: **{acc:.3f}**")
 

@@ -1,4 +1,4 @@
-# app.py — Student Apply-Insight Portal (Final Version with Graph Grouping + Tooltips + Number Input)
+# app.py — Student Apply-Insight Portal (Final Version with Decision Flow Diagram + Filter Chart + Tooltips)
 
 from pathlib import Path
 import re
@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import graphviz
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
@@ -52,7 +53,7 @@ def load_df(path: Path) -> pd.DataFrame:
 df = load_df(CSV_PATH)
 
 # -------------------------------------------------
-# 3️⃣ Shared helper: fit model for probabilities
+# 3️⃣ Model fitting for probabilities
 # -------------------------------------------------
 @st.cache_data(show_spinner=False)
 def fit_model_for_probs(df_in: pd.DataFrame, ngrams=(1, 2), min_df=3):
@@ -75,7 +76,7 @@ if prob_yes is not None:
     df["prob_no"] = 1 - prob_yes
 
 # -------------------------------------------------
-# 4️⃣ Sidebar controls (with tooltips)
+# 4️⃣ Sidebar Controls
 # -------------------------------------------------
 st.sidebar.header("Interactive Controls")
 
@@ -128,12 +129,6 @@ def tfidf_and_drivers(texts, labels, ngrams=(1, 2), min_df=3, top_n=30):
     drv_no = pd.DataFrame({"term": terms[np.argsort(coef)[:top_n]], "weight": np.sort(coef)[:top_n]})
     return drv_yes, drv_no, acc, tfidf, clf
 
-def summarize_group(df, group_col):
-    g = df.groupby(group_col).agg(rows=("label", "size"), yes_rate=("pred_label", "mean"), avg_prob_yes=("prob_yes", "mean")).reset_index()
-    g["yes_rate"] = (g["yes_rate"] * 100).round(2)
-    g["avg_prob_yes"] = g["avg_prob_yes"].round(3)
-    return g.sort_values("avg_prob_yes", ascending=False)
-
 # -------------------------------------------------
 # 6️⃣ Tabs
 # -------------------------------------------------
@@ -143,7 +138,6 @@ tab_overview, tab_tech = st.tabs(["Non-Technical", "Technical"])
 # 🟢 NON-TECHNICAL TAB
 # =================================================
 with tab_overview:
-    # KPIs
     base_label = "pred_label" if use_predictions else "label"
     yes_pct = 100 * df[base_label].mean()
     no_pct = 100 - yes_pct
@@ -155,133 +149,102 @@ with tab_overview:
     c3.metric("Avg rationale words", f"{avg_len:.1f}")
     st.markdown("---")
 
-    # -------------------------------
-    # Decision Insights section
-    # -------------------------------
     with st.container():
         st.subheader("📊 Decision Insights")
-
-        # Pie chart
         dec_col = "predicted_apply" if use_predictions else "would_apply"
         yes_count = int((df[dec_col] == "yes").sum())
         no_count = int((df[dec_col] == "no").sum())
         donut_df = pd.DataFrame({"Decision": ["Yes", "No"], "Count": [yes_count, no_count]})
-        st.plotly_chart(
-            px.pie(donut_df, names="Decision", values="Count", hole=0.55,
-                   title="Predicted Would Apply — Yes vs No" if use_predictions else "Would Apply — Yes vs No"),
-            use_container_width=True
-        )
+        st.plotly_chart(px.pie(donut_df, names="Decision", values="Count", hole=0.55), use_container_width=True)
 
-        # Bar chart 1: by background
         yes_by_bg = df.groupby("academic_background")[base_label].mean().mul(100).reset_index()
         yes_by_bg.rename(columns={base_label: "Yes %"}, inplace=True)
-        st.plotly_chart(
-            px.bar(yes_by_bg, x="academic_background", y="Yes %", color="Yes %",
-                   color_continuous_scale="Blues", title="Yes % by Academic Background").update_layout(xaxis_tickangle=-45),
-            use_container_width=True
-        )
+        st.plotly_chart(px.bar(yes_by_bg, x="academic_background", y="Yes %", color="Yes %",
+                               color_continuous_scale="Blues", title="Yes % by Academic Background").update_layout(xaxis_tickangle=-45),
+                        use_container_width=True)
 
-        # Bar chart 2: by experience
         yes_by_exp = df.groupby("previous_work_experience")[base_label].mean().mul(100).reset_index()
         yes_by_exp.rename(columns={base_label: "Yes %"}, inplace=True)
-        st.plotly_chart(
-            px.bar(yes_by_exp, x="previous_work_experience", y="Yes %", title="Work Experience Effect"),
-            use_container_width=True
-        )
+        st.plotly_chart(px.bar(yes_by_exp, x="previous_work_experience", y="Yes %", title="Work Experience Effect"),
+                        use_container_width=True)
 
     st.markdown("---")
-
-    # -------------------------------
-    # Filter & Explore
-    # -------------------------------
     st.subheader("🔍 Filter & Explore")
-    df["_background"] = df["academic_background"].astype(str)
-    df["_experience"] = df["previous_work_experience"].astype(str)
-    df["_apply"] = df["would_apply"].astype(str)
 
-    bg_sel = st.multiselect(
-        "Academic background",
-        sorted(df["_background"].unique().tolist()),
-        help="Filter data by academic background (e.g., Engineering, History, etc.)"
+    df["_background"], df["_experience"], df["_apply"] = (
+        df["academic_background"].astype(str),
+        df["previous_work_experience"].astype(str),
+        df["would_apply"].astype(str)
     )
 
-    exp_sel = st.multiselect(
-        "Previous work experience",
-        sorted(df["_experience"].unique().tolist()),
-        help="Filter data by whether users have prior work experience."
-    )
-
-    apply_sel = st.multiselect(
-        "Would apply",
-        ["yes", "no"],
-        help="Filter data by model or LLM decision outcome."
-    )
+    bg_sel = st.multiselect("Academic background", sorted(df["_background"].unique()), help="Filter data by academic background.")
+    exp_sel = st.multiselect("Previous work experience", sorted(df["_experience"].unique()), help="Filter data by experience.")
+    apply_sel = st.multiselect("Would apply", ["yes", "no"], help="Filter data by decision outcome.")
 
     view = df.copy()
-    if bg_sel:
-        view = view[view["_background"].isin(bg_sel)]
-    if exp_sel:
-        view = view[view["_experience"].isin(exp_sel)]
-    if apply_sel:
-        view = view[view["_apply"].isin(apply_sel)]
+    if bg_sel: view = view[view["_background"].isin(bg_sel)]
+    if exp_sel: view = view[view["_experience"].isin(exp_sel)]
+    if apply_sel: view = view[view["_apply"].isin(apply_sel)]
 
-    display_cols = [c for c in view.columns if c not in ["_background", "_experience", "_apply"]]
-    # Summary text
-    st.caption(f"Showing {len(view):,} of {len(df):,} total rows")
-    # --- NEW: Dynamic Yes/No percentage chart ---
+    st.caption(f"Showing {len(view):,} of {len(df):,} rows")
+
+    # --- NEW: Filtered Yes/No Graph ---
     if len(view) > 0:
         yes_count = (view["would_apply"].str.lower() == "yes").sum()
         no_count = (view["would_apply"].str.lower() == "no").sum()
-        pct_yes = (yes_count / len(view)) * 100 if len(view) > 0 else 0
-        pct_no = (no_count / len(view)) * 100 if len(view) > 0 else 0
-        
-        chart_df = pd.DataFrame({
-            "Decision": ["Yes", "No"],
-            "Percentage": [pct_yes, pct_no]
-        })
-        
-        st.plotly_chart(
-            px.bar(
-                chart_df,
-                x="Decision", y="Percentage", color="Decision",
-                color_discrete_map={"Yes": "green", "No": "red"},
-                text_auto=".1f",
-                title="Filtered Yes/No Percentage"
-            ).update_layout(yaxis_title="%", xaxis_title="", showlegend=False),
-            use_container_width=True
-        )
+        pct_yes = (yes_count / len(view)) * 100
+        pct_no = (no_count / len(view)) * 100
+        chart_df = pd.DataFrame({"Decision": ["Yes", "No"], "Percentage": [pct_yes, pct_no]})
+        st.plotly_chart(px.bar(chart_df, x="Decision", y="Percentage", color="Decision",
+                               color_discrete_map={"Yes": "green", "No": "red"},
+                               text_auto=".1f", title="Filtered Yes/No Percentage").update_layout(yaxis_title="%", showlegend=False),
+                        use_container_width=True)
     else:
         st.info("No matching records for the selected filters.")
 
-    # --- Existing Data Table ---
-    if "prob_yes" in view:
-        styled = view[display_cols].style.format({"prob_yes": "{:.2f}"}).background_gradient(subset=["prob_yes"], cmap="Greens")
-        st.dataframe(styled, use_container_width=True)
-    else:
-        st.dataframe(view[display_cols], use_container_width=True)
-        
+    display_cols = [c for c in view.columns if c not in ["_background", "_experience", "_apply"]]
+    styled = view[display_cols].style.format({"prob_yes": "{:.2f}"}).background_gradient(subset=["prob_yes"], cmap="Greens")
+    st.dataframe(styled, use_container_width=True)
+
 # =================================================
 # 🧪 TECHNICAL TAB
 # =================================================
 with tab_tech:
     st.subheader("Deep Dive: Drivers, Overlap & Probabilities")
 
+    # --- NEW: Decision Flow Diagram ---
+    st.markdown("### 🧭 How the Decision is Made")
+    st.caption("This flow shows how each profile is classified as 'YES' or 'NO' depending on whether we use the LLM or the logistic regression model.")
+    decision_flow = graphviz.Digraph()
+    decision_flow.attr(rankdir="LR", size="6,2")
+    decision_flow.node("A", "Start (Profile Input)", shape="ellipse", style="filled", color="#ADD8E6")
+    decision_flow.node("B", "Mode Selected?", shape="diamond", style="filled", color="#FFD700")
+    decision_flow.node("C1", "LLM Mode → Phi-3 (Ollama)", shape="box", style="filled", color="#C6EFCE")
+    decision_flow.node("C2", "Model Mode → Logistic Regression", shape="box", style="filled", color="#C6EFCE")
+    decision_flow.node("D1", "LLM Output → would_apply ('yes'/'no')", shape="ellipse", color="#A9D08E")
+    decision_flow.node("D2", "TF-IDF Features → P(YES)", shape="box", color="#A9D08E")
+    decision_flow.node("E", "Compare with Threshold → Predict 'YES' if ≥ thr", shape="ellipse", color="#A9D08E")
+    decision_flow.node("F", "Final Decision (YES / NO)", shape="ellipse", style="filled", color="#FFA07A")
+    decision_flow.edge("A", "B")
+    decision_flow.edge("B", "C1", label="LLM Mode")
+    decision_flow.edge("B", "C2", label="Model Mode")
+    decision_flow.edge("C1", "D1")
+    decision_flow.edge("C2", "D2")
+    decision_flow.edge("D2", "E")
+    decision_flow.edge("D1", "F")
+    decision_flow.edge("E", "F")
+    st.graphviz_chart(decision_flow)
+    st.markdown("---")
+
+    # --- Overlap & Drivers ---
     df_overlap = compute_overlap_cols(df)
     avg_overlap = df_overlap.groupby("would_apply")["overlap_count"].mean().round(2).to_dict()
     st.write("Average overlap tokens by decision:", avg_overlap)
-    st.dataframe(df_overlap[["academic_background", "previous_work_experience", "would_apply", "overlap_tokens", "overlap_count"]].head(40), width="stretch")
+    st.dataframe(df_overlap[["academic_background", "previous_work_experience", "would_apply", "overlap_tokens", "overlap_count"]].head(40), use_container_width=True)
 
     st.markdown("---")
-
     st.markdown("### Logistic Regression Drivers (n-grams = (1, 2))")
-    top_n = st.number_input(
-        "Top-N terms",
-        min_value=10,
-        max_value=50,
-        value=30,
-        step=1,
-        help="Enter how many top weighted terms you want to display (between 10 and 50)."
-    )
+    top_n = st.number_input("Top-N terms", min_value=10, max_value=50, value=30, step=1, help="Enter how many top weighted terms you want to display (10–50).")
     drv_yes, drv_no, acc, vec, clf = tfidf_and_drivers(df["profile_text"], df["label"], top_n=top_n)
     st.caption(f"Logistic holdout accuracy: **{acc:.3f}**")
 
@@ -294,20 +257,16 @@ with tab_tech:
         st.dataframe(drv_no.head(top_n), use_container_width=True)
 
     if not drv_yes.empty:
-        top10_yes = drv_yes.head(10).iloc[::-1]
-        fig_drv = px.bar(top10_yes, x="weight", y="term", orientation="h", title="Top-10 YES Drivers")
+        fig_drv = px.bar(drv_yes.head(10).iloc[::-1], x="weight", y="term", orientation="h", title="Top-10 YES Drivers")
         st.plotly_chart(fig_drv, use_container_width=True)
 
     st.markdown("---")
-
     st.markdown("### Model Probability (per profile)")
     if vec is not None and clf is not None:
         X_all = vec.transform(df["profile_text"])
         df["prob_yes"] = clf.predict_proba(X_all)[:, 1]
         df["prob_no"] = 1 - df["prob_yes"]
-
-        st.subheader("Distribution of YES probabilities")
-        fig_prob = px.histogram(df, x="prob_yes", nbins=20, title="Model confidence: P(YES)")
+        fig_prob = px.histogram(df, x="prob_yes", nbins=20, title="Model Confidence: P(YES)")
         fig_prob.update_layout(xaxis_title="P(YES)", yaxis_title="Count")
         st.plotly_chart(fig_prob, use_container_width=True)
 

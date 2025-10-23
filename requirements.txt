@@ -1,8 +1,6 @@
 streamlit
 pandas
-numpy
-matplotlib
-scikit-learn
-textblob
-wordcloud
 plotly
+scikit-learn
+numpy
+graphviz

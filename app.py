@@ -1,4 +1,4 @@
-# app.py — Student Apply-Insight Portal (drivers-only TECH tab)
+# app.py — Student Apply-Insight Portal (Interactive + Drivers-only)
 
 from pathlib import Path
 import re
@@ -8,8 +8,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-
-# ML
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer, ENGLISH_STOP_WORDS
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
@@ -38,12 +36,8 @@ def load_df(path: Path) -> pd.DataFrame:
     df = df[df["would_apply"].isin(["yes", "no"])].copy()
     df["label"] = (df["would_apply"] == "yes").astype(int)
     df["rationale"] = df["rationale"].fillna("").astype(str)
-
-    # Drop legacy column if it exists
     if "auto_fixed" in df.columns:
         df.drop(columns=["auto_fixed"], inplace=True)
-
-    # Build profile_text if missing (used for modeling)
     if "profile_text" not in df.columns:
         def build_profile_text(r):
             return (
@@ -60,10 +54,50 @@ def load_df(path: Path) -> pd.DataFrame:
 df = load_df(CSV_PATH)
 
 # -----------------------------
+# Shared model for prob_yes
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def fit_model_for_probs(df_in: pd.DataFrame, ngrams=(1,2), min_df=3):
+    try:
+        y = df_in["would_apply"].astype(str).str.lower().eq("yes").astype(int).values
+        tfidf = TfidfVectorizer(ngram_range=ngrams, min_df=min_df, stop_words="english")
+        X = tfidf.fit_transform(df_in["profile_text"].astype(str).tolist())
+        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
+        clf = LogisticRegression(max_iter=400)
+        clf.fit(X_tr, y_tr)
+        acc = float(clf.score(X_te, y_te))
+        prob_yes = clf.predict_proba(X)[:, 1]
+        return prob_yes, tfidf, clf, acc
+    except Exception:
+        return None, None, None, None
+
+if "prob_yes" not in df.columns:
+    prob_yes, shared_vec, shared_clf, shared_acc = fit_model_for_probs(df, ngrams=(1,2), min_df=3)
+    if prob_yes is not None:
+        df["prob_yes"] = prob_yes
+        df["prob_no"]  = 1 - df["prob_yes"]
+else:
+    shared_vec = shared_clf = None
+    shared_acc = None
+
+# -----------------------------
+# Sidebar Controls
+# -----------------------------
+st.sidebar.header("Interactive Controls")
+thr = st.sidebar.slider("Decision threshold (P(YES) ≥ …)", 0.0, 1.0, 0.50, 0.01)
+use_predictions = st.sidebar.toggle("Use model predictions instead of original Yes/No", value=False)
+
+if "prob_yes" in df.columns:
+    df["predicted_apply"] = np.where(df["prob_yes"] >= thr, "yes", "no")
+    df["pred_label"] = (df["predicted_apply"] == "yes").astype(int)
+else:
+    df["predicted_apply"] = df["would_apply"]
+    df["pred_label"] = df["label"]
+
+# -----------------------------
 # Helpers
 # -----------------------------
-def _norm_tokens(s: str) -> list[str]:
-    return re.findall(r"[a-z0-9\-]+", str(s).lower())
+def _norm_tokens(s: str): return re.findall(r"[a-z0-9\-]+", str(s).lower())
 
 @st.cache_data(show_spinner=False)
 def compute_overlap_cols(df_: pd.DataFrame) -> pd.DataFrame:
@@ -77,128 +111,62 @@ def compute_overlap_cols(df_: pd.DataFrame) -> pd.DataFrame:
     return df2
 
 @st.cache_data(show_spinner=False)
-def tfidf_and_drivers(
-    texts: list[str],
-    labels: np.ndarray,
-    ngrams: Tuple[int, int] = (1, 2),
-    min_df: int = 3,
-    top_n: int = 30,
-):
-    """
-    Fit TF-IDF + Logistic Regression; return only drivers & accuracy.
-    """
+def tfidf_and_drivers(texts, labels, ngrams=(1,2), min_df=3, top_n=30):
     tfidf = TfidfVectorizer(ngram_range=ngrams, min_df=min_df, stop_words="english")
     try:
         X = tfidf.fit_transform(texts)
-    except ValueError:
-        return (pd.DataFrame(), pd.DataFrame(), 0.0, None, None)
-
-    terms = np.array(tfidf.get_feature_names_out())
-    y = np.asarray(labels)
-
-    try:
+        terms = np.array(tfidf.get_feature_names_out())
+        y = np.asarray(labels)
         X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
         clf = LogisticRegression(max_iter=400)
         clf.fit(X_tr, y_tr)
         acc = float(clf.score(X_te, y_te))
         coef = clf.coef_.ravel()
-
-        drv_yes_idx = np.argsort(coef)[-top_n:][::-1]
-        drv_no_idx  = np.argsort(coef)[:top_n]
-
-        drivers_yes = pd.DataFrame({"term": terms[drv_yes_idx], "weight": coef[drv_yes_idx]})
-        drivers_no  = pd.DataFrame({"term": terms[drv_no_idx],  "weight": coef[drv_no_idx]})
+        drv_yes = pd.DataFrame({"term": terms[np.argsort(coef)[-top_n:][::-1]], "weight": np.sort(coef)[-top_n:][::-1]})
+        drv_no  = pd.DataFrame({"term": terms[np.argsort(coef)[:top_n]], "weight": np.sort(coef)[:top_n]})
+        return drv_yes, drv_no, acc, tfidf, clf
     except Exception:
-        acc = 0.0
-        clf = None
-        drivers_yes = pd.DataFrame()
-        drivers_no  = pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), 0.0, None, None
 
-    return drivers_yes, drivers_no, acc, tfidf, clf
-
-def summarize_group(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
-    g = (
-        df.groupby(group_col)
-          .agg(
-              rows=("label","size"),
-              yes_rate=("label","mean"),
-              avg_prob_yes=("prob_yes","mean")
-          )
-          .reset_index()
-    )
+def summarize_group(df, group_col):
+    g = df.groupby(group_col).agg(rows=("label","size"), yes_rate=("pred_label","mean"), avg_prob_yes=("prob_yes","mean")).reset_index()
     g["yes_rate"] = (g["yes_rate"] * 100).round(2)
     g["avg_prob_yes"] = g["avg_prob_yes"].round(3)
     return g.sort_values("avg_prob_yes", ascending=False)
 
-# ==== Distinctive phrase extraction for Non-Technical tab ====
-DOMAIN_STOP = {
-    # generic & filler
-    "program","university","degree","course","ms","master","saint","louis",
-    "online","format","curriculum","offer","offers","united","states",
-    "think","feel","feels","going","like","well","closely","based","right","it",
-    "align","aligns","aligned","alignment","fit","fits","fitting","suit","suits",
-    "with","my","the","in","for","to","and","or","of","at","on","by","as",
-    # domain-generic that show up in both classes
-    "analytics","data","background","interests","professional","academic"
-}
+DOMAIN_STOP = {"program","university","degree","course","ms","master","saint","louis","online","format",
+                "curriculum","offer","offers","united","states","think","feel","feels","going","like","well",
+                "closely","based","right","it","align","aligns","aligned","alignment","fit","fits","fitting",
+                "suit","suits","with","my","the","in","for","to","and","or","of","at","on","by","as",
+                "analytics","data","background","interests","professional","academic"}
 
-def _has_content_word(phrase: str, stop: set[str]) -> bool:
+def _has_content_word(phrase, stop):
     for tok in phrase.split():
         t = "".join(ch for ch in tok if ch.isalpha())
-        if len(t) >= 4 and t not in stop:
-            return True
+        if len(t) >= 4 and t not in stop: return True
     return False
 
 @st.cache_data(show_spinner=False)
-def class_distinctive_phrases(
-    df_in: pd.DataFrame,
-    label_col="would_apply",
-    text_col="rationale",
-    ngram_range=(2,3),
-    min_df=3,
-    top_n=15,
-    extra_stop=None,
-):
-    stop = set(ENGLISH_STOP_WORDS) | DOMAIN_STOP | set(extra_stop or [])
+def class_distinctive_phrases(df_in, label_col="would_apply", text_col="rationale", ngram_range=(2,3), min_df=3, top_n=15):
+    stop = set(ENGLISH_STOP_WORDS) | DOMAIN_STOP
     texts = df_in[text_col].fillna("").astype(str).str.lower().tolist()
     y = df_in[label_col].astype(str).str.lower().tolist()
-
     vec = TfidfVectorizer(ngram_range=ngram_range, min_df=min_df, stop_words=list(stop))
     X = vec.fit_transform(texts)
     terms = vec.get_feature_names_out()
-
     y_arr = np.array(y)
-    yes_mask = (y_arr == "yes")
-    no_mask  = (y_arr == "no")
-
-    if yes_mask.sum() == 0 or no_mask.sum() == 0:
-        return (pd.DataFrame(columns=["phrase","score"]), pd.DataFrame(columns=["phrase","score"]))
-
-    yes_mean = X[yes_mask].mean(axis=0).A1
-    no_mean  = X[no_mask].mean(axis=0).A1
+    yes_mask, no_mask = (y_arr=="yes"), (y_arr=="no")
+    yes_mean, no_mean = X[yes_mask].mean(axis=0).A1, X[no_mask].mean(axis=0).A1
     diff = yes_mean - no_mean
-
     keep = np.array([_has_content_word(t, stop) for t in terms])
-    terms_f = terms[keep]
-    diff_f  = diff[keep]
-
-    idx_yes = diff_f.argsort()[::-1][:top_n]
+    terms_f, diff_f = terms[keep], diff[keep]
+    idx_yes, idx_no = diff_f.argsort()[::-1][:top_n], diff_f.argsort()[:top_n]
     top_yes = pd.DataFrame({"phrase": terms_f[idx_yes], "score": diff_f[idx_yes]})
-
-    idx_no = diff_f.argsort()[:top_n]
-    top_no = pd.DataFrame({"phrase": terms_f[idx_no], "score": (-diff_f[idx_no])})
+    top_no  = pd.DataFrame({"phrase": terms_f[idx_no], "score": (-diff_f[idx_no])})
     return top_yes, top_no
 
 # -----------------------------
-# Derived Stats (Non-Tech KPIs)
-# -----------------------------
-df["label"] = (df["would_apply"].str.lower() == "yes").astype(int)
-yes_pct = 100 * df["label"].mean()
-no_pct  = 100 - yes_pct
-avg_len = df["rationale"].apply(lambda s: len(str(s).split())).mean()
-
-# -----------------------------
-# Tabs
+# Derived Stats + Tabs
 # -----------------------------
 tab_overview, tab_tech = st.tabs(["Non-Technical", "Technical"])
 
@@ -207,275 +175,146 @@ tab_overview, tab_tech = st.tabs(["Non-Technical", "Technical"])
 # ======================================================
 with tab_overview:
     # KPI tiles
+    base_label = "pred_label" if use_predictions else "label"
+    yes_pct = 100 * df[base_label].mean()
+    no_pct  = 100 - yes_pct
+    avg_len = df["rationale"].apply(lambda s: len(str(s).split())).mean()
     c1, c2, c3 = st.columns(3)
-    c1.metric("Yes %", f"{yes_pct:.1f}%")
-    c2.metric("No %", f"{no_pct:.1f}%")
+    c1.metric(("Predicted Yes %" if use_predictions else "Yes %"), f"{yes_pct:.1f}%")
+    c2.metric(("Predicted No %"  if use_predictions else "No %"),  f"{no_pct:.1f}%")
     c3.metric("Avg rationale words", f"{avg_len:.1f}")
 
     st.markdown("---")
 
-    # Outcome donut
-    st.subheader("Overall outcome")
-    yes_count = int((df["would_apply"] == "yes").sum())
-    no_count  = int((df["would_apply"] == "no").sum())
-    donut_df = pd.DataFrame({"Decision": ["Yes", "No"], "Count": [yes_count, no_count]})
+    # Donut + bars
+    dec_col = "predicted_apply" if use_predictions else "would_apply"
+    yes_count = int((df[dec_col] == "yes").sum())
+    no_count  = int((df[dec_col] == "no").sum())
+    donut_df = pd.DataFrame({"Decision":["Yes","No"],"Count":[yes_count,no_count]})
     st.plotly_chart(px.pie(donut_df, names="Decision", values="Count", hole=0.55,
-                           title="Would Apply — Yes vs No"))
+                           title=("Predicted Would Apply — Yes vs No" if use_predictions else "Would Apply — Yes vs No")))
 
-    # Yes% by background
-    st.subheader("Yes % by Academic Background", anchor="yes-by-academic-background")
-    yes_by_bg = (
-        df.groupby("academic_background")["label"].mean().mul(100).reset_index().rename(columns={"label": "Yes %"})
-    )
-    yes_by_bg = yes_by_bg.sort_values("Yes %", ascending=False)
-    st.plotly_chart(px.bar(yes_by_bg, x="academic_background", y="Yes %",
-                           color="Yes %", color_continuous_scale="Blues",
-                           title="Likelihood to Apply by Background").update_layout(
-                               xaxis_title="Academic Background", yaxis_title="Yes %",
-                               xaxis_tickangle=-45, showlegend=False))
+    label_for_group = "pred_label" if use_predictions else "label"
+    yes_by_bg = df.groupby("academic_background")[label_for_group].mean().mul(100).reset_index().rename(columns={label_for_group:"Yes %"})
+    yes_by_exp = df.groupby("previous_work_experience")[label_for_group].mean().mul(100).reset_index().rename(columns={label_for_group:"Yes %"})
+    st.plotly_chart(px.bar(yes_by_bg, x="academic_background", y="Yes %", color="Yes %", color_continuous_scale="Blues",
+                           title="Likelihood to Apply by Background").update_layout(xaxis_tickangle=-45))
+    st.plotly_chart(px.bar(yes_by_exp, x="previous_work_experience", y="Yes %", title="Work Experience Effect"))
 
-    # Yes% by experience
-    st.subheader("Yes % by Work Experience")
-    yes_by_exp = (
-        df.groupby("previous_work_experience")["label"].mean().mul(100).reset_index()
-        .rename(columns={"label": "Yes %", "previous_work_experience": "Work Experience"})
-    )
-    st.plotly_chart(px.bar(yes_by_exp, x="Work Experience", y="Yes %",
-                           title="Work Experience Effect"))
-
+    # Distinctive phrases
     st.markdown("---")
-
-    # Distinctive phrases (class contrast)
     st.subheader("Common rationale keywords (distinctive phrases)")
     col_a, col_b = st.columns(2)
-
-    top_yes_ph, top_no_ph = class_distinctive_phrases(
-        df,
-        label_col="would_apply",
-        text_col="rationale",
-        ngram_range=(2,3),
-        min_df=3,  # increase to 4–5 to suppress fluff further
-        top_n=15,
-        extra_stop=set()
-    )
-
+    top_yes_ph, top_no_ph = class_distinctive_phrases(df, label_col=dec_col)
     with col_a:
         st.caption("🟢 Distinctive phrases for YES")
         if not top_yes_ph.empty:
-            fig_yes_ph = px.bar(
-                top_yes_ph.iloc[::-1], x="score", y="phrase",
-                orientation="h", title="YES-class distinctive phrases (TF-IDF Δ)"
-            )
-            fig_yes_ph.update_layout(yaxis_title="", xaxis_title="Distinctiveness")
+            fig_yes_ph = px.bar(top_yes_ph.iloc[::-1], x="score", y="phrase", orientation="h")
             st.plotly_chart(fig_yes_ph)
-            st.download_button(
-                "Download YES distinctive phrases (CSV)",
-                data=top_yes_ph.to_csv(index=False).encode("utf-8"),
-                file_name="yes_distinctive_phrases.csv",
-                mime="text/csv",
-            )
-        else:
-            st.info("Not enough YES rationales to extract distinctive phrases.")
-
     with col_b:
         st.caption("🔴 Distinctive phrases for NO")
         if not top_no_ph.empty:
-            fig_no_ph = px.bar(
-                top_no_ph.iloc[::-1], x="score", y="phrase",
-                orientation="h", title="NO-class distinctive phrases (TF-IDF Δ)"
-            )
-            fig_no_ph.update_layout(yaxis_title="", xaxis_title="Distinctiveness")
+            fig_no_ph = px.bar(top_no_ph.iloc[::-1], x="score", y="phrase", orientation="h")
             st.plotly_chart(fig_no_ph)
-            st.download_button(
-                "Download NO distinctive phrases (CSV)",
-                data=top_no_ph.to_csv(index=False).encode("utf-8"),
-                file_name="no_distinctive_phrases.csv",
-                mime="text/csv",
-            )
-        else:
-            st.info("Not enough NO rationales to extract distinctive phrases.")
 
+    # Cohort compare
     st.markdown("---")
+    st.subheader("Cohort Compare (A/B)")
+    left = st.selectbox("Cohort A", sorted(df["academic_background"].dropna().unique()))
+    right = st.selectbox("Cohort B", sorted(df["academic_background"].dropna().unique()), index=min(1,len(df["academic_background"].unique())-1))
+    A, B = df[df["academic_background"]==left], df[df["academic_background"]==right]
+    c1, c2 = st.columns(2)
+    for block, name, d in [(c1,left,A),(c2,right,B)]:
+        with block:
+            st.markdown(f"**{name}**")
+            st.metric("Rows", len(d))
+            st.metric("Yes %", f"{(100*d[label_for_group].mean() if len(d) else 0):.1f}%")
+            if "prob_yes" in d: st.metric("Avg P(YES)", f"{d['prob_yes'].mean():.2f}")
+            st.dataframe(d[["academic_background","previous_work_experience",dec_col,"prob_yes","rationale"]].head(15), width="stretch")
 
-    # Filterable table
+    # Search
+    st.markdown("---")
+    st.subheader("Quick search")
+    q = st.text_input("Search text (rationale or profile)", "")
+    if q:
+        mask = df["rationale"].str.contains(q, case=False, na=False) | df["profile_text"].str.contains(q, case=False, na=False)
+        found = df[mask].copy()
+        st.caption(f"Matched {len(found):,} rows for “{q}”")
+    else:
+        found = df.copy()
+    show_cols = [c for c in ["academic_background","previous_work_experience",dec_col,"prob_yes","rationale"] if c in found.columns]
+    st.dataframe(found.assign(rationale=lambda d: d["rationale"].str.replace(q,f"**{q}**",case=False,regex=False) if q else d["rationale"])[show_cols].head(200), width="stretch")
+
+    # Filter table (color-coded)
+    st.markdown("---")
     st.subheader("Filter & Explore")
-    df["_background"] = df["academic_background"].astype(str)
-    df["_experience"] = df["previous_work_experience"].astype(str)
-    df["_apply"] = df["would_apply"].astype(str).str.lower()
-
-    colf1, colf2, colf3, colf4 = st.columns([1, 1, 1, 0.5])
-    with colf1:
-        bg_sel = st.multiselect("Academic background", sorted(df["_background"].unique().tolist()))
-    with colf2:
-        exp_sel = st.multiselect("Previous work experience", sorted(df["_experience"].unique().tolist()))
-    with colf3:
-        apply_sel = st.multiselect("Would apply", ["yes", "no"])
-    with colf4:
-        reset = st.button("Reset filters")
-
+    df["_background"], df["_experience"], df["_apply"] = df["academic_background"].astype(str), df["previous_work_experience"].astype(str), df["would_apply"].astype(str)
+    bg_sel = st.multiselect("Academic background", sorted(df["_background"].unique().tolist()))
+    exp_sel = st.multiselect("Previous work experience", sorted(df["_experience"].unique().tolist()))
+    apply_sel = st.multiselect("Would apply", ["yes","no"])
     view = df.copy()
-    if reset:
-        bg_sel, exp_sel, apply_sel = [], [], []
-    if bg_sel:
-        view = view[view["_background"].isin(bg_sel)]
-    if exp_sel:
-        view = view[view["_experience"].isin(exp_sel)]
-    if apply_sel:
-        view = view[view["_apply"].isin([a.lower() for a in apply_sel])]
-
-    display_cols = [c for c in view.columns if c not in ["_background", "_experience", "_apply"]]
+    if bg_sel: view = view[view["_background"].isin(bg_sel)]
+    if exp_sel: view = view[view["_experience"].isin(exp_sel)]
+    if apply_sel: view = view[view["_apply"].isin(apply_sel)]
+    display_cols = [c for c in view.columns if c not in ["_background","_experience","_apply"]]
     st.caption(f"Showing {len(view):,} of {len(df):,} rows")
-    st.dataframe(view[display_cols], width="stretch")
-    st.download_button(
-        "Download filtered CSV",
-        data=view[display_cols].to_csv(index=False).encode("utf-8"),
-        file_name="decisions_filtered.csv",
-        mime="text/csv",
-    )
+    if "prob_yes" in view:
+        styled = view[display_cols].style.format({"prob_yes":"{:.2f}"}).background_gradient(subset=["prob_yes"], cmap="Greens")
+        st.dataframe(styled, use_container_width=True)
+    else:
+        st.dataframe(view[display_cols], width="stretch")
 
 # ======================================================
-# 🧪 TECHNICAL TAB — Logistic Regression only (no TF-IDF diff tables)
+# 🧪 TECHNICAL TAB — Logistic Regression only + Interactivity
 # ======================================================
 with tab_tech:
     st.subheader("Deep Dive: Drivers, Overlap & Probabilities")
 
-    # ---------- Overlap
+    # Overlap
     st.markdown("**Profile ↔ Rationale Overlap**")
     df_overlap = compute_overlap_cols(df)
     avg_overlap = df_overlap.groupby("would_apply")["overlap_count"].mean().round(2).to_dict()
     st.write("Average overlap tokens by decision:", avg_overlap)
-    st.dataframe(
-        df_overlap[["academic_background","previous_work_experience","would_apply","overlap_tokens","overlap_count"]]
-        .sort_values("overlap_count", ascending=False)
-        .head(40),
-        width="stretch"
-    )
-    st.download_button(
-        "Download overlap sample (CSV)",
-        data=df_overlap.nlargest(200, "overlap_count")[["academic_background","previous_work_experience","would_apply","overlap_tokens","overlap_count"]]
-            .to_csv(index=False).encode("utf-8"),
-        file_name="overlap_top200.csv",
-        mime="text/csv",
-    )
+    st.dataframe(df_overlap[["academic_background","previous_work_experience","would_apply","overlap_tokens","overlap_count"]].head(40), width="stretch")
 
     st.markdown("---")
 
-    # ---------- Logistic Regression Drivers (ONLY)
+    # Logistic Regression Drivers
     st.markdown("### Logistic Regression Drivers")
-    st.caption("Trained on TF-IDF features internally; we show only the learned drivers (coefficients).")
-
-    colcfg1, colcfg2 = st.columns([1, 1])
-    ngram_opt = colcfg1.selectbox("n-grams", ["1", "1-2"], index=1)
-    ngrams = (1, 2) if ngram_opt == "1-2" else (1, 1)
-    top_n = colcfg2.slider("Top-N terms", 10, 50, 30, 5)
-
-    FIXED_MIN_DF = 3
-    drv_yes, drv_no, acc, vec, clf = tfidf_and_drivers(
-        df["profile_text"].astype(str).tolist(),
-        df["label"].values,
-        ngrams=ngrams, min_df=FIXED_MIN_DF, top_n=top_n
-    )
-    st.caption(f"Logistic holdout accuracy (sanity check): **{acc:.3f}**")
-
-    c3, c4 = st.columns(2)
-    with c3:
+    st.caption("Trained on TF-IDF features internally; showing learned drivers only.")
+    drv_yes, drv_no, acc, vec, clf = tfidf_and_drivers(df["profile_text"].astype(str).tolist(), df["label"].values)
+    st.caption(f"Logistic holdout accuracy: **{acc:.3f}**")
+    c1, c2 = st.columns(2)
+    with c1:
         st.write("**Push toward YES**")
-        st.dataframe(drv_yes.head(top_n), width="stretch")
-        st.download_button(
-            "Download YES drivers",
-            data=drv_yes.to_csv(index=False).encode("utf-8"),
-            file_name="drivers_yes.csv",
-            mime="text/csv",
-        )
-    with c4:
+        st.dataframe(drv_yes.head(30), width="stretch")
+    with c2:
         st.write("**Push toward NO**")
-        st.dataframe(drv_no.head(top_n), width="stretch")
-        st.download_button(
-            "Download NO drivers",
-            data=drv_no.to_csv(index=False).encode("utf-8"),
-            file_name="drivers_no.csv",
-            mime="text/csv",
-        )
-
-    st.markdown("##### Top-10 YES Drivers (visual)")
+        st.dataframe(drv_no.head(30), width="stretch")
     if not drv_yes.empty:
-        top10_yes = drv_yes.head(10).iloc[::-1]
-        fig_drv = px.bar(
-            top10_yes, x="weight", y="term", orientation="h",
-            title="Terms that push the model toward a YES decision"
-        )
-        fig_drv.update_layout(xaxis_title="Coefficient weight (↑ = more YES)", yaxis_title="Term")
-        st.plotly_chart(fig_drv)
-    else:
-        st.info("Drivers not available with current settings or dataset size.")
+        fig_drv = px.bar(drv_yes.head(10).iloc[::-1], x="weight", y="term", orientation="h",
+                         title="Top-10 YES Drivers")
+        st.plotly_chart(fig_drv, use_container_width=True)
 
+    # Probability dist by segment
     st.markdown("---")
+    st.subheader("Probability distribution by segment")
+    if "prob_yes" in df:
+        opt = st.selectbox("Breakdown by…", ["academic_background","previous_work_experience"])
+        fig = px.violin(df, x=opt, y="prob_yes", box=True, points="all")
+        fig.update_layout(yaxis_title="P(YES)", xaxis_title=opt, xaxis_tickangle=-45)
+        st.plotly_chart(fig, use_container_width=True)
 
-    # ---------- Per-profile probabilities
-    st.markdown("### Model Probability (per profile)")
-    if vec is not None and clf is not None:
-        X_all = vec.transform(df["profile_text"].astype(str).tolist())
-        df["prob_yes"] = clf.predict_proba(X_all)[:, 1]
-        df["prob_no"] = 1 - df["prob_yes"]
-
-        st.subheader("Distribution of YES probabilities")
-        fig_prob = px.histogram(df, x="prob_yes", nbins=20, title="Model confidence: P(YES)")
-        fig_prob.update_layout(xaxis_title="P(YES)", yaxis_title="Count")
-        st.plotly_chart(fig_prob)
-
-        st.subheader("Most confident profiles")
+    # Per-profile
+    st.markdown("---")
+    st.subheader("Most confident profiles")
+    if "prob_yes" in df:
         c_yes, c_no = st.columns(2)
         with c_yes:
             st.caption("🟢 Highest P(YES)")
-            st.dataframe(
-                df.sort_values("prob_yes", ascending=False)
-                  .head(20)[["academic_background","previous_work_experience","would_apply","prob_yes","rationale"]],
-                width="stretch"
-            )
+            st.dataframe(df.sort_values("prob_yes", ascending=False).head(20)[["academic_background","previous_work_experience","would_apply","prob_yes","rationale"]], width="stretch")
         with c_no:
             st.caption("🔴 Lowest P(YES)")
-            st.dataframe(
-                df.sort_values("prob_yes", ascending=True)
-                  .head(20)[["academic_background","previous_work_experience","would_apply","prob_yes","rationale"]],
-                width="stretch"
-            )
+            st.dataframe(df.sort_values("prob_yes", ascending=True).head(20)[["academic_background","previous_work_experience","would_apply","prob_yes","rationale"]], width="stretch")
 
-        st.markdown("---")
-        st.subheader("Average model probability by group")
-        cols = st.columns(2)
-        with cols[0]:
-            if "academic_background" in df.columns:
-                g_bg = summarize_group(df, "academic_background")
-                st.write("**By Academic Background**")
-                st.dataframe(g_bg, width="stretch")
-                st.download_button(
-                    "Download summary (background)",
-                    data=g_bg.to_csv(index=False).encode("utf-8"),
-                    file_name="avg_prob_by_background.csv",
-                    mime="text/csv",
-                )
-        with cols[1]:
-            if "previous_work_experience" in df.columns:
-                g_exp = summarize_group(df, "previous_work_experience")
-                st.write("**By Work Experience**")
-                st.dataframe(g_exp, width="stretch")
-                st.download_button(
-                    "Download summary (experience)",
-                    data=g_exp.to_csv(index=False).encode("utf-8"),
-                    file_name="avg_prob_by_experience.csv",
-                    mime="text/csv",
-                )
-
-        st.markdown("---")
-        st.subheader("Download enriched data")
-        st.download_button(
-            "Download decisions with probabilities (CSV)",
-            data=df.to_csv(index=False).encode("utf-8"),
-            file_name="decisions_with_probs.csv",
-            mime="text/csv",
-        )
-    else:
-        st.info("Model not available for probability scoring with current settings.")
-
-# Footer
 st.caption("Data source: data/decisions_enriched.csv • Student Apply-Insight Portal")
